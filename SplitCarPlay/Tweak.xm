@@ -417,12 +417,15 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
 
 #pragma mark App hosting — ADAPT path (see header comment)
 
-- (void)hostApp:(NSString *)bundleID inContainer:(UIView *)container replacingExisting:(UIViewController **)slot {
+// `slot` takes the address of a strong ivar (e.g. &_leftAppVC). Declaring it
+// explicitly `__strong` (rather than the implicit `__autoreleasing` ARC
+// gives bare `Type **` parameters) avoids ARC's by-reference write-back
+// requirement, which rejects taking the address of an ivar directly.
+- (void)hostApp:(NSString *)bundleID inContainer:(UIView *)container replacingExisting:(UIViewController * __strong *)slot {
     if (bundleID.length == 0) return;
-    if (*slot && [(*slot) respondsToSelector:@selector(view)] && [(*slot).view.superview == container]) {
-        // Already hosting the right thing; avoid re-creating the scene.
-        // (A real implementation should also check whether bundleID changed.)
-    }
+    // NOTE: a real implementation should check whether *slot is already
+    // hosting this exact bundleID (and bail out early) before re-creating
+    // the scene below — omitted here for brevity.
 
     Class appControllerClass = objc_getClass("SBApplicationController");
     Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
