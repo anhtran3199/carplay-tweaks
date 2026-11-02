@@ -44,6 +44,7 @@
 //  personal-use-only; see README.md.
 //
 #import <UIKit/UIKit.h>
+#import <sys/stat.h>
 
 #pragma mark - Flutter public API (real, documented — see header comment)
 
