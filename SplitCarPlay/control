@@ -6,6 +6,6 @@ Description: Side-by-side split screen for two apps on the CarPlay display
 Maintainer: anhtran3199@gmail.com
 Author: anhtran3199@gmail.com
 Section: Tweaks
-Depends: mobilesubstrate, preferenceloader
+Depends: mobilesubstrate | ellekit, preferenceloader
 Icon: https://anhtran3199.github.io/carplay-tweaks/icon.png
 Depiction: https://anhtran3199.github.io/carplay-tweaks/depictions/splitcarplay.html

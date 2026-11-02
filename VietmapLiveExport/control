@@ -6,6 +6,6 @@ Description: Exports Vietmap Live's current speed-limit warning to a shared file
 Maintainer: anhtran3199@gmail.com
 Author: anhtran3199@gmail.com
 Section: Tweaks
-Depends: mobilesubstrate
+Depends: mobilesubstrate | ellekit
 Icon: https://anhtran3199.github.io/carplay-tweaks/icon.png
 Depiction: https://anhtran3199.github.io/carplay-tweaks/depictions/vietmaplivexport.html
