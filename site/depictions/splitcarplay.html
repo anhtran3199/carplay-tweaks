@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SplitCarPlay</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 600px; margin: 24px auto; padding: 0 16px; color: #1c1c1e; }
+  .warn { background: #fff4e5; border: 1px solid #ffd79a; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  code { background: #f2f2f7; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>SplitCarPlay</h1>
+  <p>Chia màn hình CarPlay thành 2 nửa, mỗi nửa chạy 1 app, có divider kéo được và card tốc độ nổi.</p>
+
+  <div class="warn">
+    <strong>Trạng thái:</strong> starter project, một phần dùng <code>ADAPT</code> — chưa xác nhận đầy đủ
+    trên thiết bị thật. Phần tạo cửa sổ trên màn hình CarPlay đã đối chiếu với mã nguồn mở thật
+    (carplay-cast); phần host app cụ thể vào từng nửa màn hình cần bạn tự xác nhận bằng class-dump
+    trên máy của bạn. Xem README trong repo để biết chi tiết.
+  </div>
+
+  <h3>Cấu hình</h3>
+  <p>Settings → SplitCarPlay: chọn bundle ID 2 app, tỉ lệ chia, bật/tắt divider và speed card.</p>
+</body>
+</html>

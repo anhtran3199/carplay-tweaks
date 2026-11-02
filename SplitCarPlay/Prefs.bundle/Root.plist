@@ -1,0 +1,134 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>title</key>
+	<string>SplitCarPlay</string>
+	<key>specifiers</key>
+	<array>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>SplitCarPlay</string>
+			<key>footerText</key>
+			<string>Split the CarPlay screen between two apps. Enter the bundle identifier of each app (e.g. com.google.Maps). Re-tap CarPlay (or reconnect) after changing settings.</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Enabled</string>
+			<key>key</key>
+			<string>enabled</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Apps</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>label</key>
+			<string>Left App Bundle ID</string>
+			<key>key</key>
+			<string>leftBundleID</string>
+			<key>default</key>
+			<string>com.apple.Maps</string>
+			<key>autoCapsType</key>
+			<string>None</string>
+			<key>autoCorrectionType</key>
+			<string>No</string>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSEditTextCell</string>
+			<key>label</key>
+			<string>Right App Bundle ID</string>
+			<key>key</key>
+			<string>rightBundleID</string>
+			<key>default</key>
+			<string>com.apple.Music</string>
+			<key>autoCapsType</key>
+			<string>None</string>
+			<key>autoCorrectionType</key>
+			<string>No</string>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Layout</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>Split Ratio (Left Width %)</string>
+			<key>key</key>
+			<string>splitRatio</string>
+			<key>default</key>
+			<real>0.5</real>
+			<key>min</key>
+			<real>0.2</real>
+			<key>max</key>
+			<real>0.8</real>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Show Divider Handle</string>
+			<key>key</key>
+			<string>showDivider</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Speed Bubble</string>
+			<key>footerText</key>
+			<string>Mirrors Vietmap Live's own speed-limit warning (not raw GPS). Requires the companion tweak VietmapLiveExport to also be installed and Vietmap Live to be running.</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Show Speed Bubble</string>
+			<key>key</key>
+			<string>showSpeedBubble</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+	</array>
+</dict>
+</plist>

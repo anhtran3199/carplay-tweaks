@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VietmapLiveExport</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; max-width: 600px; margin: 24px auto; padding: 0 16px; color: #1c1c1e; }
+  .warn { background: #fff4e5; border: 1px solid #ffd79a; border-radius: 10px; padding: 12px 14px; font-size: 14px; }
+  code { background: #f2f2f7; padding: 2px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+  <h1>VietmapLiveExport</h1>
+  <p>Đọc tốc độ hiện tại + giới hạn tốc độ từ Vietmap Live (hook <code>FlutterMethodChannel</code>,
+     API công khai của Flutter) và chia sẻ cho SplitCarPlay hiển thị trên CarPlay.</p>
+
+  <div class="warn">
+    <strong>Cần cài cùng SplitCarPlay.</strong> Và cần bật chế độ ghi log cuộc gọi
+    (<code>notifyutil -p com.example.vietmaplivexport/toggle-logging</code>) một lần để xác nhận
+    đúng tên field dữ liệu trên phiên bản Vietmap Live bạn đang dùng — xem README trong repo.
+  </div>
+</body>
+</html>
