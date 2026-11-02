@@ -24,12 +24,22 @@ jobs:
       - name: Setup Theos
         uses: waruhachi/theos-action@v2.6.5
 
+      # THEOS_PACKAGE_SCHEME=rootless targets modern rootless jailbreaks
+      # (Dopamine, roothide, ...) -- the ones this repo is actually meant
+      # for (confirmed target device: iPhone 7, iOS 15.8.8, Dopamine 2).
+      # Theos handles this by using the /var/jb install prefix and
+      # rewriting the packaged control's Architecture to iphoneos-arm64
+      # automatically; nothing else in our Makefiles needs to change.
       - name: Build SplitCarPlay
+        env:
+          THEOS_PACKAGE_SCHEME: rootless
         run: |
           cd SplitCarPlay
           make clean package FINALPACKAGE=1
 
       - name: Build VietmapLiveExport
+        env:
+          THEOS_PACKAGE_SCHEME: rootless
         run: |
           cd VietmapLiveExport
           make clean package FINALPACKAGE=1
