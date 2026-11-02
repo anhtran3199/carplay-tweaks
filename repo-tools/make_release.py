@@ -24,7 +24,16 @@ LABEL = "CarPlay tweaks"
 SUITE = "stable"
 VERSION = "1.0"
 CODENAME = "ios"
-ARCHITECTURES = "iphoneos-arm"
+# The .deb packages themselves declare "Architecture: iphoneos-arm" (the
+# standard Theos catch-all), which dpkg-on-iOS treats as compatible with
+# any arm64 variant. But Sileo's source-add check compares this Release
+# field against the device's *actual* reported architecture (what
+# DPKGArchitecture() returns -- "iphoneos-arm64" on rootful/arm64 devices,
+# "iphoneos-arm64e" on rootless/arm64e ones), not the package's field, and
+# 404s the add if it isn't an exact match. List every real device
+# architecture explicitly (this is what working repos like
+# sideplay.pages.dev do) rather than just the generic package-level name.
+ARCHITECTURES = "iphoneos-arm iphoneos-arm64 iphoneos-arm64e"
 COMPONENTS = "main"
 DESCRIPTION = "Personal CarPlay tweaks (SplitCarPlay, VietmapLiveExport)"
 
