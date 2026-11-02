@@ -46,8 +46,11 @@ jobs:
           cp -R site/. _site/
           python3 repo-tools/make_packages.py _site/debs _site/Packages
           gzip -9 -k -f _site/Packages
+          python3 repo-tools/make_release.py _site _site/Release
           echo "Packages written:"
           cat _site/Packages
+          echo "Release written:"
+          cat _site/Release
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
