@@ -26,12 +26,25 @@ in, so this list builds on work already validated as the right direction.
       "Title — Artist" text in the Card/Bar extras row. Toggle:
       "Show Now Playing".
 - [x] **Preview/simulation screen** — Settings → "Mô phỏng (Preview)"
-      renders the real bubble (all 3 styles, switchable live) plus
-      placeholder app boxes, without needing an actual CarPlay
-      connection — same idea as Vietmap Live's own "Mô phỏng" tab and
-      SidePlay2's static mockup images. Uses live Vietmap data when
-      available, clearly-labeled demo numbers otherwise. See
-      `Prefs.bundle/SplitCarPlayPreviewController.m`.
+      renders the real bubble (all 3 styles + left/right position,
+      switchable live) plus app placeholders showing the real app icon
+      (not just text), without needing an actual CarPlay connection —
+      same idea as Vietmap Live's own "Mô phỏng" tab and SidePlay2's
+      static mockup images. Uses live Vietmap data when available,
+      clearly-labeled demo numbers otherwise. **Not** attempted: actually
+      rendering the picked apps' live UI (what SidePlay2's own preview
+      does) — Settings.app/Preferences.app has no way to host another
+      app's scene the way CarPlayApp can; see the file's header comment.
+      See `Prefs.bundle/SplitCarPlayPreviewController.m`.
+- [x] **Bubble position (left/right)** — Settings → "Bubble Position".
+      Re-applied every reload (a deliberate Settings choice, not
+      overridden by a one-off drag); vertical position still follows
+      wherever you've dragged it.
+- [x] **Card style visual polish** — date/battery moved to the top (above
+      the speed readout, matching Vietmap Live's own preview layout), the
+      old two-line status paragraph replaced with a compact one-line
+      status row, and a real drop shadow (via a mask layer, so rounding
+      the corners doesn't clip the shadow away too).
 
 ## Data source
 

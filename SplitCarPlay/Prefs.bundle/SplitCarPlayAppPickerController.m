@@ -103,7 +103,9 @@ NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID) {
 // SpringBoard (e.g. App Switcher-style UIs). respondsToSelector:-guarded:
 // if this selector name turns out wrong on this iOS version, icons just
 // don't show (nil) instead of crashing.
-static UIImage *SplitCarPlayAppIcon(NSString *bundleID) {
+// Exported (not static) so SplitCarPlayPreviewController.m can show real
+// app icons instead of plain text placeholders.
+UIImage *SplitCarPlayAppIcon(NSString *bundleID) {
     if (bundleID.length == 0) return nil;
     SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if (![UIImage respondsToSelector:sel]) return nil;

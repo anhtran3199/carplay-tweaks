@@ -17,9 +17,22 @@
 //  state file is a plain path on disk, readable from any process) or
 //  clearly-labeled demo numbers when there's nothing real to show yet.
 //
+//  WHY THE APP PLACEHOLDERS SHOW AN ICON, NOT A LIVE APP VIEW
+//
+//  SidePlay2's own preview actually renders its navigation app live.
+//  That's not reproducible here: Settings.app/Preferences.app has no way
+//  to host another app's scene the way CarPlayApp can (the exact
+//  mechanism `Tweak.xm`'s `hostApp:inContainer:replacingExisting:` uses,
+//  and still marked ADAPT/untested there) — this process simply isn't
+//  CarPlayApp. Showing the real app icon (same private API the picker
+//  list already uses) is the honest, safe middle ground: more "alive"
+//  looking than plain text, without pretending to do something this
+//  process can't actually do.
+//
 #import <UIKit/UIKit.h>
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // SplitCarPlayAppPickerController.m
+extern UIImage *SplitCarPlayAppIcon(NSString *bundleID); // SplitCarPlayAppPickerController.m
 
 typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     SplitCarPlayBubbleStyleCard = 0,
@@ -43,6 +56,8 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 
 @interface SplitCarPlayPreviewBubbleView : UIView
 @property (nonatomic, assign) SplitCarPlayBubbleStyle style;
+@property (nonatomic, assign) BOOL showDate;
+@property (nonatomic, assign) BOOL showBattery;
 // isLive = real Vietmap Live data vs. made-up demo numbers (controls the
 // status icon/text and whether the ring/bar tint as "connected"); the
 // speed number itself always shows (demo or real) so the preview always
@@ -57,16 +72,32 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UIImageView *_statusIconView;
     UILabel *_statusLabel;
     UIView *_statusBar;
+    UILabel *_extrasLabel;
     CAShapeLayer *_ringLayer;
+    CAShapeLayer *_maskLayer;
+    NSDateFormatter *_timeFormatter;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.96];
-        self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1;
         self.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
+
+        // Rounded-corner clip via a mask (not masksToBounds=YES), so the
+        // drop shadow below isn't clipped away too — same technique as
+        // the real SpeedBubbleView in Tweak.xm.
+        self.layer.masksToBounds = NO;
+        _maskLayer = [CAShapeLayer new];
+        self.layer.mask = _maskLayer;
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOpacity = 0.25;
+        self.layer.shadowRadius = 6;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
+
+        _timeFormatter = [NSDateFormatter new];
+        _timeFormatter.dateFormat = @"HH:mm";
 
         _speedBox = [[UIView alloc] init];
         _speedBox.backgroundColor = [UIColor whiteColor];
@@ -94,11 +125,17 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         [self addSubview:_statusIconView];
 
         _statusLabel = [[UILabel alloc] init];
-        _statusLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
-        _statusLabel.textAlignment = NSTextAlignmentCenter;
-        _statusLabel.numberOfLines = 2;
+        _statusLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
+        _statusLabel.textAlignment = NSTextAlignmentLeft;
+        _statusLabel.numberOfLines = 1;
         _statusLabel.textColor = [UIColor colorWithWhite:0.35 alpha:1];
         [self addSubview:_statusLabel];
+
+        _extrasLabel = [[UILabel alloc] init];
+        _extrasLabel.textAlignment = NSTextAlignmentCenter;
+        _extrasLabel.font = [UIFont systemFontOfSize:10];
+        _extrasLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+        [self addSubview:_extrasLabel];
 
         _statusBar = [[UIView alloc] init];
         [self addSubview:_statusBar];
@@ -117,6 +154,24 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     [self setNeedsLayout];
 }
 
+- (void)updateMaskWithCornerRadius:(CGFloat)radius {
+    self.layer.cornerRadius = radius;
+    _maskLayer.frame = self.bounds;
+    _maskLayer.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+}
+
+- (NSString *)extrasText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    if (self.showDate) [parts addObject:[_timeFormatter stringFromDate:[NSDate date]]];
+    if (self.showBattery) {
+        UIDevice *device = [UIDevice currentDevice];
+        if (device.batteryState != UIDeviceBatteryStateUnknown) {
+            [parts addObject:[NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100]];
+        }
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     switch (self.style) {
@@ -127,7 +182,7 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 }
 
 - (void)layoutCard {
-    self.layer.cornerRadius = 14;
+    [self updateMaskWithCornerRadius:14];
     _ringLayer.hidden = YES;
     _speedBox.hidden = NO;
     _speedLabel.font = [UIFont boldSystemFontOfSize:28];
@@ -138,13 +193,23 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _statusBar.hidden = NO;
 
     CGFloat w = self.bounds.size.width, pad = 8;
-    _speedBox.frame = CGRectMake(pad, pad, w - pad * 2, 52);
+    CGFloat y = pad;
+
+    _extrasLabel.hidden = !(self.showDate || self.showBattery);
+    if (!_extrasLabel.hidden) {
+        _extrasLabel.text = [self extrasText];
+        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
+        y = CGRectGetMaxY(_extrasLabel.frame) + 2;
+    }
+
+    _speedBox.frame = CGRectMake(pad, y, w - pad * 2, 52);
     _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
     _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
+    y = CGRectGetMaxY(_speedBox.frame) + 6;
 
-    CGFloat iconSize = 22;
-    _statusIconView.frame = CGRectMake((w - iconSize) / 2.0, CGRectGetMaxY(_speedBox.frame) + 8, iconSize, iconSize);
-    _statusLabel.frame = CGRectMake(pad, CGRectGetMaxY(_statusIconView.frame) + 4, w - pad * 2, 28);
+    CGFloat iconSize = 14;
+    _statusIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
+    _statusLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_statusIconView.frame) - 4, iconSize + 2);
 
     CGFloat barHeight = 4;
     _statusBar.frame = CGRectMake(pad, self.bounds.size.height - barHeight - 6, w - pad * 2, barHeight);
@@ -153,11 +218,12 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 
 - (void)layoutRing {
     CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height);
-    self.layer.cornerRadius = side / 2.0;
+    [self updateMaskWithCornerRadius:side / 2.0];
     _ringLayer.hidden = NO;
     _speedBox.hidden = YES;
     _statusLabel.hidden = YES;
     _statusBar.hidden = YES;
+    _extrasLabel.hidden = YES;
 
     CGRect ringFrame = CGRectMake((self.bounds.size.width - side) / 2.0, (self.bounds.size.height - side) / 2.0, side, side);
     CGFloat inset = _ringLayer.lineWidth / 2.0 + 2;
@@ -176,11 +242,12 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 }
 
 - (void)layoutBar {
-    self.layer.cornerRadius = self.bounds.size.height / 2.0;
+    [self updateMaskWithCornerRadius:self.bounds.size.height / 2.0];
     _ringLayer.hidden = YES;
     _speedBox.hidden = YES;
     _statusLabel.hidden = YES;
     _statusBar.hidden = NO;
+    _extrasLabel.hidden = YES;
 
     CGFloat h = self.bounds.size.height, pad = 10;
     CGFloat iconSize = MIN(16, h - 8);
@@ -208,7 +275,7 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         _statusIconView.image = [UIImage systemImageNamed:isLive ? @"checkmark.circle.fill" : @"questionmark.circle"];
     }
     _statusIconView.tintColor = isLive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
-    _statusLabel.text = isLive ? @"Đã kết nối\nVietmap Live" : @"Dữ liệu demo\n(chưa có Vietmap Live)";
+    _statusLabel.text = isLive ? @"Vietmap Live" : @"Demo";
     _statusBar.backgroundColor = overLimit ? [UIColor systemRedColor]
         : (isLive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor]);
 }
@@ -223,11 +290,15 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 @implementation SplitCarPlayPreviewController {
     UIView *_leftPlaceholder;
     UIView *_rightPlaceholder;
+    UIImageView *_leftIconView;
+    UIImageView *_rightIconView;
     UILabel *_leftLabel;
     UILabel *_rightLabel;
     SplitCarPlayPreviewBubbleView *_bubble;
     UISegmentedControl *_styleControl;
+    UISegmentedControl *_positionControl;
     UILabel *_captionLabel;
+    CGFloat _splitRatio;
 }
 
 - (void)viewDidLoad {
@@ -240,6 +311,11 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     [self.view addSubview:_leftPlaceholder];
     [self.view addSubview:_rightPlaceholder];
 
+    _leftIconView = [self makeIconView];
+    _rightIconView = [self makeIconView];
+    [_leftPlaceholder addSubview:_leftIconView];
+    [_rightPlaceholder addSubview:_rightIconView];
+
     _leftLabel = [self makePlaceholderLabel];
     _rightLabel = [self makePlaceholderLabel];
     [_leftPlaceholder addSubview:_leftLabel];
@@ -251,12 +327,17 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     [_styleControl addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:_styleControl];
 
+    _positionControl = [[UISegmentedControl alloc] initWithItems:@[@"Trái", @"Phải"]];
+    _positionControl.selectedSegmentIndex = [prefs[@"bubblePosition"] integerValue];
+    [_positionControl addTarget:self action:@selector(positionChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:_positionControl];
+
     _captionLabel = [[UILabel alloc] init];
     _captionLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1];
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = @"Xem trước giao diện — không cần cắm CarPlay thật. Đổi kiểu bên dưới để xem ngay; thay đổi cũng áp dụng cho màn hình CarPlay thật nếu đang cắm.";
+    _captionLabel.text = @"Xem trước giao diện — không cần cắm CarPlay thật. Đổi kiểu/vị trí bên dưới để xem ngay; thay đổi cũng áp dụng cho màn hình CarPlay thật nếu đang cắm.";
     [self.view addSubview:_captionLabel];
 
     _bubble = [[SplitCarPlayPreviewBubbleView alloc] initWithFrame:CGRectZero];
@@ -277,10 +358,18 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     return view;
 }
 
+- (UIImageView *)makeIconView {
+    UIImageView *iconView = [[UIImageView alloc] init];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.layer.cornerRadius = 12;
+    iconView.layer.masksToBounds = YES;
+    return iconView;
+}
+
 - (UILabel *)makePlaceholderLabel {
     UILabel *label = [[UILabel alloc] init];
     label.textColor = [UIColor colorWithWhite:0.6 alpha:1];
-    label.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
+    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
     label.textAlignment = NSTextAlignmentCenter;
     label.numberOfLines = 2;
     return label;
@@ -293,11 +382,18 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     CGFloat carScreenHeight = 220;
 
     CGFloat dividerWidth = 4;
-    CGFloat leftWidth = floor(bounds.size.width * 0.5 - dividerWidth / 2.0) - 16;
+    CGFloat usableWidth = bounds.size.width - 32 - dividerWidth;
+    CGFloat ratio = _splitRatio > 0 ? _splitRatio : 0.5;
+    CGFloat leftWidth = floor(usableWidth * ratio);
+    CGFloat rightWidth = usableWidth - leftWidth;
     _leftPlaceholder.frame = CGRectMake(16, topInset, leftWidth, carScreenHeight);
-    _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, leftWidth, carScreenHeight);
-    _leftLabel.frame = _leftPlaceholder.bounds;
-    _rightLabel.frame = _rightPlaceholder.bounds;
+    _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, rightWidth, carScreenHeight);
+
+    CGFloat iconSize = MIN(56, _leftPlaceholder.bounds.size.width - 24);
+    _leftIconView.frame = CGRectMake((_leftPlaceholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
+    _rightIconView.frame = CGRectMake((_rightPlaceholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
+    _leftLabel.frame = CGRectMake(4, CGRectGetMaxY(_leftIconView.frame) + 8, _leftPlaceholder.bounds.size.width - 8, 32);
+    _rightLabel.frame = CGRectMake(4, CGRectGetMaxY(_rightIconView.frame) + 8, _rightPlaceholder.bounds.size.width - 8, 32);
 
     CGFloat bubbleW = 116, bubbleH = 188;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
@@ -305,10 +401,14 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         case SplitCarPlayBubbleStyleBar: bubbleW = 220; bubbleH = 44; break;
         default: break;
     }
-    _bubble.frame = CGRectMake(CGRectGetMaxX(_rightPlaceholder.frame) - bubbleW - 8, topInset + 8, bubbleW, bubbleH);
+    BOOL bubbleOnLeft = _positionControl.selectedSegmentIndex == 0;
+    CGFloat bubbleX = bubbleOnLeft ? CGRectGetMinX(_leftPlaceholder.frame) + 8
+                                    : CGRectGetMaxX(_rightPlaceholder.frame) - bubbleW - 8;
+    _bubble.frame = CGRectMake(bubbleX, topInset + 8, bubbleW, bubbleH);
 
     _styleControl.frame = CGRectMake(16, CGRectGetMaxY(_leftPlaceholder.frame) + 20, bounds.size.width - 32, 32);
-    _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 60);
+    _positionControl.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 32);
+    _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 60);
 }
 
 - (void)styleChanged:(UISegmentedControl *)sender {
@@ -317,12 +417,32 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     [self.view setNeedsLayout];
 }
 
+- (void)positionChanged:(UISegmentedControl *)sender {
+    SplitCarPlaySetPref(@"bubblePosition", @(sender.selectedSegmentIndex));
+    [self.view setNeedsLayout];
+}
+
 - (void)refresh {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
-    _leftLabel.text = [NSString stringWithFormat:@"Left\n%@", SplitCarPlayDisplayNameForBundleID(prefs[@"leftBundleID"]) ?: @"(chưa chọn)"];
-    _rightLabel.text = [NSString stringWithFormat:@"Right\n%@", SplitCarPlayDisplayNameForBundleID(prefs[@"rightBundleID"]) ?: @"(chưa chọn)"];
+    NSString *leftID = prefs[@"leftBundleID"];
+    NSString *rightID = prefs[@"rightBundleID"];
+    _leftLabel.text = SplitCarPlayDisplayNameForBundleID(leftID) ?: @"(chưa chọn)";
+    _rightLabel.text = SplitCarPlayDisplayNameForBundleID(rightID) ?: @"(chưa chọn)";
+    _leftIconView.image = SplitCarPlayAppIcon(leftID);
+    _rightIconView.image = SplitCarPlayAppIcon(rightID);
 
+    // Match Tweak.xm's loadPreferences defaults for anything the user
+    // hasn't touched yet in Settings -- an untouched PS specifier shows
+    // its "default" on-screen but doesn't necessarily write that value
+    // into this plist file until actually changed, so reading the file
+    // directly (as this whole controller does, for simplicity) needs the
+    // same fallback or this preview can show a different starting value
+    // than what the real CarPlay bubble would actually use.
     _bubble.style = (SplitCarPlayBubbleStyle)[prefs[@"bubbleStyle"] integerValue];
+    _bubble.showDate = prefs[@"showDate"] ? [prefs[@"showDate"] boolValue] : YES;
+    _bubble.showBattery = prefs[@"showBattery"] ? [prefs[@"showBattery"] boolValue] : YES;
+    _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
+    _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
 
     NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
     NSNumber *timestamp = state[@"timestamp"];

@@ -176,6 +176,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     UILabel *_extrasLabel;       // "Card" style: date · battery, one line
     UILabel *_nowPlayingLabel;   // "Card" style: now-playing, one line
     CAShapeLayer *_ringLayer;    // "Ring" style only
+    CAShapeLayer *_maskLayer;    // rounded-corner clip (a mask, not masksToBounds, so the shadow below isn't clipped too)
     UILabel *_barExtrasLabel;    // "Bar" style: date/battery/now-playing combined
     BOOL _connected;
     BOOL _overLimit;
@@ -186,9 +187,20 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.96];
-        self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1;
         self.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
+
+        // Rounded-corner clipping via a mask layer rather than
+        // masksToBounds=YES, so the drop shadow just below isn't clipped
+        // away along with everything else outside the rounded rect.
+        self.layer.masksToBounds = NO;
+        _maskLayer = [CAShapeLayer new];
+        self.layer.mask = _maskLayer;
+
+        self.layer.shadowColor = [UIColor blackColor].CGColor;
+        self.layer.shadowOpacity = 0.25;
+        self.layer.shadowRadius = 6;
+        self.layer.shadowOffset = CGSizeMake(0, 2);
 
         _timeFormatter = [NSDateFormatter new];
         _timeFormatter.dateFormat = @"HH:mm";
@@ -221,7 +233,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         _statusLabel.font = [UIFont systemFontOfSize:11 weight:UIFontWeightMedium];
         _statusLabel.textAlignment = NSTextAlignmentCenter;
         _statusLabel.numberOfLines = 2;
-        _statusLabel.text = @"Chưa có dữ liệu\nVietmap Live";
+        _statusLabel.text = @"Chưa kết nối";
         _statusLabel.textColor = [UIColor colorWithWhite:0.35 alpha:1];
         [self addSubview:_statusLabel];
 
@@ -267,6 +279,12 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [self setNeedsLayout];
 }
 
+- (void)updateMaskWithCornerRadius:(CGFloat)radius {
+    self.layer.cornerRadius = radius; // kept in sync too, even though masksToBounds=NO means this alone wouldn't clip
+    _maskLayer.frame = self.bounds;
+    _maskLayer.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     switch (self.style) {
@@ -277,7 +295,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 }
 
 - (void)layoutCardStyle {
-    self.layer.cornerRadius = 14;
+    [self updateMaskWithCornerRadius:14];
     _ringLayer.hidden = YES;
     _barExtrasLabel.hidden = YES;
     _speedBox.hidden = NO;
@@ -291,24 +309,35 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [_speedBox addSubview:_speedLabel];
     [_speedBox addSubview:_unitLabel];
     _speedLabel.font = [UIFont boldSystemFontOfSize:28];
+    _statusLabel.numberOfLines = 1; // compact single-line status, not the old 2-line paragraph
+    _statusLabel.textAlignment = NSTextAlignmentLeft;
+    _statusLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
 
     CGFloat w = self.bounds.size.width;
     CGFloat pad = 8;
+    CGFloat y = pad;
 
-    _speedBox.frame = CGRectMake(pad, pad, w - pad * 2, 52);
-    _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
-    _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
-
-    CGFloat iconSize = 22;
-    _statusIconView.frame = CGRectMake((w - iconSize) / 2.0, CGRectGetMaxY(_speedBox.frame) + 8, iconSize, iconSize);
-    _statusLabel.frame = CGRectMake(pad, CGRectGetMaxY(_statusIconView.frame) + 4, w - pad * 2, 28);
-
-    CGFloat y = CGRectGetMaxY(_statusLabel.frame) + 2;
+    // Date/battery row at the TOP, above the speed readout (matches
+    // Vietmap Live's own "Mô phỏng" preview layout, which puts date +
+    // battery above the big speed number).
     _extrasLabel.hidden = !(self.showDate || self.showBattery);
     if (!_extrasLabel.hidden) {
         _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
-        y = CGRectGetMaxY(_extrasLabel.frame);
+        y = CGRectGetMaxY(_extrasLabel.frame) + 2;
     }
+
+    _speedBox.frame = CGRectMake(pad, y, w - pad * 2, 52);
+    _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
+    _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
+    y = CGRectGetMaxY(_speedBox.frame) + 6;
+
+    // Compact one-line status: a small dot-style icon + short text,
+    // instead of a big icon with two lines of text underneath it.
+    CGFloat iconSize = 14;
+    _statusIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
+    _statusLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_statusIconView.frame) - 4, iconSize + 2);
+    y += iconSize + 6;
+
     _nowPlayingLabel.hidden = !self.showNowPlaying || _nowPlayingLabel.text.length == 0;
     if (!_nowPlayingLabel.hidden) {
         _nowPlayingLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
@@ -325,7 +354,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     // (date/battery/now-playing) are deliberately omitted here — the
     // whole point of this style is to be small.
     CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height);
-    self.layer.cornerRadius = side / 2.0;
+    [self updateMaskWithCornerRadius:side / 2.0];
     _ringLayer.hidden = NO;
     _barExtrasLabel.hidden = YES;
     _speedBox.hidden = YES;
@@ -350,7 +379,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 }
 
 - (void)layoutBarStyle {
-    self.layer.cornerRadius = self.bounds.size.height / 2.0;
+    [self updateMaskWithCornerRadius:self.bounds.size.height / 2.0];
     _ringLayer.hidden = YES;
     _speedBox.hidden = YES;
     _extrasLabel.hidden = YES;
@@ -446,7 +475,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     }
     _statusIconView.tintColor = connected ? [UIColor systemGreenColor] : [UIColor systemGrayColor];
 
-    _statusLabel.text = connected ? @"Đã kết nối\nVietmap Live" : @"Chưa có dữ liệu\nVietmap Live";
+    _statusLabel.text = connected ? @"Vietmap Live" : @"Chưa kết nối";
     _statusBar.backgroundColor = connected
         ? (overLimit ? [UIColor systemRedColor] : [UIColor systemGreenColor])
         : [UIColor colorWithWhite:0.8 alpha:1];
@@ -502,6 +531,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         @"showDivider": @YES,
         @"showSpeedBubble": @YES,
         @"bubbleStyle": @0,
+        @"bubblePosition": @1, // 0 = left, 1 = right (matches the original top-right placement)
         @"speedAudioAlert": @YES,
         @"showDate": @YES,
         @"showBattery": @YES,
@@ -542,15 +572,21 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
     self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
 
-    // Resize (not reposition — keep wherever the user dragged it) to fit
-    // whichever style is active; a Card needs more vertical room for the
-    // extras rows than a compact Ring or a wide-short Bar does.
+    // Resize to fit whichever style is active (a Card needs more vertical
+    // room than a compact Ring or a wide-short Bar), and re-apply the
+    // left/right side pref every reload -- that's a deliberate placement
+    // choice from Settings, not something a one-off drag should silently
+    // override. Vertical position (y) is left alone so dragging the
+    // bubble up/down still sticks.
     CGRect frame = self.speedBubble.frame;
     switch (self.speedBubble.style) {
         case SplitCarPlayBubbleStyleRing: frame.size = CGSizeMake(100, 100); break;
         case SplitCarPlayBubbleStyleBar: frame.size = CGSizeMake(220, 44); break;
         case SplitCarPlayBubbleStyleCard: default: frame.size = CGSizeMake(116, 188); break;
     }
+    BOOL bubbleOnLeft = [prefs[@"bubblePosition"] integerValue] == 0;
+    CGFloat screenWidth = self.rootWindow.bounds.size.width;
+    frame.origin.x = bubbleOnLeft ? 16 : (screenWidth - frame.size.width - 16);
     self.speedBubble.frame = frame;
 
     if (!self.speedBubble.hidden) [self refreshSpeedBubble];
