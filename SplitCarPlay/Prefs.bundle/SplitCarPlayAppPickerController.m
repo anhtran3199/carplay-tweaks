@@ -64,6 +64,21 @@ static NSString *SplitCarPlayAppDisplayName(LSApplicationProxy *app) {
     return SplitCarPlayAppBundleID(app); // last-resort fallback, never nil if bundleIdentifier worked
 }
 
+// -applicationType returns "User" for apps the user installed (App
+// Store/sideloaded) vs "System"/"Internal"/"Hidden" for Apple's own
+// bundled apps -- the standard, widely-used signal for exactly this
+// "hide system apps" filter in jailbreak app pickers. If this selector
+// doesn't respond on this iOS version, we don't filter at all (show
+// everything) rather than risk hiding everything.
+static BOOL SplitCarPlayAppLooksUserInstalled(LSApplicationProxy *app) {
+    if (![app respondsToSelector:@selector(applicationType)]) return YES;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+    NSString *type = [app performSelector:@selector(applicationType)];
+#pragma clang diagnostic pop
+    return [type isEqualToString:@"User"];
+}
+
 // Exported (not static) so SplitCarPlayPrefsListController.m can show the
 // currently-selected app's name next to "Left App"/"Right App".
 //
@@ -145,7 +160,9 @@ static void SplitCarPlaySetPref(NSString *key, NSString *value) {
 
     NSMutableArray<LSApplicationProxy *> *validApps = [NSMutableArray new];
     for (LSApplicationProxy *app in all) {
-        if (SplitCarPlayAppBundleID(app).length > 0) [validApps addObject:app];
+        if (SplitCarPlayAppBundleID(app).length > 0 && SplitCarPlayAppLooksUserInstalled(app)) {
+            [validApps addObject:app];
+        }
     }
     [validApps sortUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
         return [SplitCarPlayAppDisplayName(a) caseInsensitiveCompare:SplitCarPlayAppDisplayName(b)];
