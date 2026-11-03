@@ -110,21 +110,20 @@ static id getCarPlayDisplay(void) {
 //  Live's own "Mô phỏng" preview screen: a boxed speed readout, a
 //  connected/disconnected status row, and a thin status bar at the
 //  bottom. Every value here (speed number, over-limit color, and whether
-//  we're "connected") comes ONLY from whatever the companion tweak
-//  VietmapLiveExport last wrote to a shared file after reading it off
-//  Vietmap Live's own UI — this view does not talk to GPS/CoreLocation.
-//  "Connected" just means "a fresh value arrived within the last
-//  kVietmapStaleAfter seconds", i.e. Vietmap Live is running and the
-//  heuristic in VietmapLiveExport is currently matching something — it is
-//  not a real handshake/protocol with Vietmap Live (no such thing exists
-//  publicly; see VietmapLiveExport/README.md).
+//  we're "connected") comes ONLY from whatever VietmapLiveHook.xm (this
+//  same dylib, running inside Vietmap Live's own process — see its
+//  header comment) last wrote to a shared file. This view does not talk
+//  to GPS/CoreLocation itself. "Connected" just means "a fresh value
+//  arrived within the last kVietmapStaleAfter seconds", i.e. Vietmap
+//  Live is running and the hook is currently seeing calls — it is not a
+//  real handshake/protocol with Vietmap Live.
 //
 static NSString * const kVietmapSharedStatePath = @"/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist";
 static NSString * const kVietmapUpdateDarwinNotification = @"com.example.splitcarplay/vietmap-update";
 static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected" if no fresh update
 
 @interface SpeedBubbleView : UIView
-- (void)applyState:(NSDictionary *)state; // state may be nil (= never heard from VietmapLiveExport)
+- (void)applyState:(NSDictionary *)state; // state may be nil (= never heard from VietmapLiveHook.xm)
 @end
 
 @implementation SpeedBubbleView {
@@ -350,7 +349,7 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     [self.rootWindow addSubview:self.dividerView];
     [self.rootWindow addSubview:self.speedBubble]; // on top, so it floats over both halves
 
-    // VietmapLiveExport only notifies us when it has a fresh value — if it
+    // VietmapLiveHook.xm only notifies us when it has a fresh value — if it
     // goes quiet (Vietmap Live closed, heuristic stops matching) nothing
     // will tell us that, so poll periodically to flip the card to
     // "disconnected" once the last value goes stale.
@@ -378,7 +377,7 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     self.speedBubbleStaleTimer = nil;
 }
 
-#pragma mark Speed bubble (data comes from the VietmapLiveExport companion tweak)
+#pragma mark Speed bubble (data comes from VietmapLiveHook.xm, same dylib)
 
 - (void)refreshSpeedBubble {
     if (!self.speedBubble || self.speedBubble.hidden) return;
@@ -486,6 +485,17 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
 
 %ctor {
     @autoreleasepool {
+        // This dylib is now also injected into Vietmap Live (see
+        // VietmapLiveHook.xm's header comment) -- none of the CarPlay
+        // window/split-view code below is relevant there, so bail out
+        // immediately if we're not in one of the two processes it's
+        // actually meant for.
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+        if (![bundleID isEqualToString:@"com.apple.CarPlayApp"] &&
+            ![bundleID isEqualToString:@"com.apple.springboard"]) {
+            return;
+        }
+
         // Re-check whenever a display connects/disconnects (CarPlay plug/unplug)
         // and whenever the user changes a preference.
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenDidConnectNotification
@@ -512,7 +522,8 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        // Posted by the companion tweak VietmapLiveExport whenever it
+        // Posted by VietmapLiveHook.xm (same dylib, running inside Vietmap
+        // Live's own process) whenever it
         // picks up a new speed-limit reading from Vietmap Live.
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),

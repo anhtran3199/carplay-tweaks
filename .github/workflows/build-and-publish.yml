@@ -56,13 +56,6 @@ jobs:
           cd SplitCarPlay
           make clean package FINALPACKAGE=1
 
-      - name: Build VietmapLiveExport
-        env:
-          THEOS_PACKAGE_SCHEME: rootless
-        run: |
-          cd VietmapLiveExport
-          make clean package FINALPACKAGE=1
-
       - name: Install dpkg-deb (for generating Packages metadata)
         run: brew install dpkg
 
@@ -71,7 +64,6 @@ jobs:
           set -euo pipefail
           mkdir -p _site/debs
           cp SplitCarPlay/packages/*.deb _site/debs/
-          cp VietmapLiveExport/packages/*.deb _site/debs/
           cp -R site/. _site/
           python3 repo-tools/make_packages.py _site/debs _site/Packages
           gzip -9 -k -f _site/Packages

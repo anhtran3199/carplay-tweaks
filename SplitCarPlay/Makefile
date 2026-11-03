@@ -7,7 +7,7 @@ INSTALL_TARGET_PROCESSES = CarPlayApp
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SplitCarPlay
-SplitCarPlay_FILES = Tweak.xm
+SplitCarPlay_FILES = Tweak.xm VietmapLiveHook.xm
 SplitCarPlay_CFLAGS = -fobjc-arc
 SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore
 # No _PRIVATE_FRAMEWORKS here on purpose: every private class in Tweak.xm is

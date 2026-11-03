@@ -5,10 +5,13 @@ CarPlay display, with a draggable divider. Same category of tweak as
 SidePlay/CarSplit/DashSplit — this is a from-scratch implementation you build
 and adapt yourself, not a copy of any of them.
 
-## Status: starter project, not a finished product
+## Status
 
-This has **not** been compiled or tested on a device. It's split into two
-tiers, clearly marked in `Tweak.xm`:
+The Settings UI (Prefs.bundle — app picker, toggles, speed card wiring)
+has been built, fixed, and tested through several real-device iterations
+and works. The actual CarPlay split-screen window/app-hosting code in
+`Tweak.xm` has **not** been tried on a real CarPlay session yet and is
+split into two tiers, clearly marked in `Tweak.xm`:
 
 - **VERIFIED** — the window-creation path (find the CarPlay `CADisplay` →
   wrap in `FBSDisplayConfiguration` → create a `UIRootSceneWindow` on it →
@@ -64,26 +67,31 @@ Changing a setting posts the Darwin notification
 re-lays-out immediately — no respring needed for ratio/divider changes
 (app swaps re-create the hosted scene, which may flicker).
 
-## Speed bubble (Vietmap Live)
+## Speed card (Vietmap Live)
 
-A floating circular bubble (`SpeedBubbleView` in `Tweak.xm`) can show on top
-of the split, mirroring **Vietmap Live's own speed-limit warning** (the
-number it's displaying, and whether you're over it — shown as a red vs.
-grey ring) rather than a raw GPS speed. SplitCarPlay itself does nothing
-Vietmap-specific — it just reads
-`/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist`
-whenever it's notified that a new value landed there.
+A floating card (`SpeedBubbleView` in `Tweak.xm`) shows on top of the
+split, mirroring **Vietmap Live's own current speed + speed-limit
+warning** (red ring when over the limit) rather than a raw GPS reading.
 
-That file is written by a separate, companion tweak,
-**`../VietmapLiveExport/`**, which injects only into Vietmap Live
-(`vn.vietmap.live`) and relays what it sees. **Install both tweaks** for the
-bubble to show anything; see `VietmapLiveExport/README.md` for how it works
-and — importantly — how unverified its detection heuristic is until you
-tune it on your own device.
+This used to be a separate companion tweak (VietmapLiveExport); it's now
+merged directly into this same package as **`VietmapLiveHook.xm`** —
+install just this one tweak. That file injects into the same dylib but
+only *acts* when it's loaded inside Vietmap Live's own process
+(`vn.vietmap.live`): it hooks `FlutterMethodChannel` (Vietmap Live is a
+Flutter app — a real, public, Google-documented class, not a guessed
+private one) and writes what it sees to
+`/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist`,
+which the CarPlay-side code (`SpeedBubbleView`/`SplitCarPlayController`
+in `Tweak.xm`) reads. See `VietmapLiveHook.xm`'s header comment for the
+full mechanism writeup and how to verify/tune its payload-parsing on your
+installed Vietmap Live version (there's a call logger —
+`notifyutil -p com.example.vietmaplivexport/toggle-logging` — writing to
+`/var/mobile/Library/Logs/vietmaplivexport_calls.log`).
 
-Toggle it from Settings → SplitCarPlay → "Show Speed Bubble". It auto-hides
-if no fresh reading has arrived in the last 6 seconds (Vietmap Live not
-running, or the heuristic hasn't matched anything).
+Toggle the card from Settings → SplitCarPlay → "Show Speed Bubble". It
+auto-hides if no fresh reading has arrived in the last 6 seconds (Vietmap
+Live not running, or the hook isn't matching the expected channel/method
+names on your installed version).
 
 ## Design notes / where to extend
 
