@@ -185,5 +185,45 @@ static void vmHandleFlutterCall(FlutterMethodCall *call) {
             kVMToggleLoggingNotification,
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        if (!SplitCarPlay_RunningInVietmapLive()) return;
+
+        // Posted by Tweak.xm (same dylib, CarPlayApp/springboard side) when
+        // CarPlay disconnects and "Auto-Close Vietmap Live on CarPlay
+        // Disconnect" is on. Vietmap Live calling exit() on itself is a
+        // normal, safe app-initiated quit — not a crash/force-kill.
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                        const void *object, CFDictionaryRef userInfo) {
+                exit(0);
+            },
+            (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+
+        // "Keep Vietmap Live Running in Background" — ask iOS for extra
+        // background execution time via the fully public
+        // beginBackgroundTaskWithExpirationHandler: API, called from
+        // inside Vietmap Live's own process (since this dylib is loaded
+        // there). iOS still enforces its own background time limits
+        // regardless — this is the standard, safe best-effort attempt at
+        // "stay alive a bit longer," not a guarantee of indefinite
+        // background life.
+        [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                            object:nil
+                                                             queue:nil
+                                                        usingBlock:^(NSNotification *note) {
+            NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.example.splitcarplay.plist"];
+            NSNumber *keepAlive = prefs[@"keepSourceAppAlive"];
+            if (keepAlive && ![keepAlive boolValue]) return; // explicit off; default is on
+
+            UIApplication *app = [UIApplication sharedApplication];
+            __block UIBackgroundTaskIdentifier taskID = UIBackgroundTaskInvalid;
+            taskID = [app beginBackgroundTaskWithExpirationHandler:^{
+                [app endBackgroundTask:taskID];
+            }];
+        }];
     }
 }

@@ -18,6 +18,15 @@
 
 		<dict>
 			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Mô phỏng (Preview)</string>
+			<key>action</key>
+			<string>openPreview:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>label</key>
 			<string>Enabled</string>
@@ -135,6 +144,132 @@
 			<string>com.example.splitcarplay</string>
 			<key>default</key>
 			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSLinkListCell</string>
+			<key>label</key>
+			<string>Bubble Style</string>
+			<key>key</key>
+			<string>bubbleStyle</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<integer>0</integer>
+			<key>validTitles</key>
+			<array>
+				<string>Card</string>
+				<string>Ring</string>
+				<string>Bar</string>
+			</array>
+			<key>validValues</key>
+			<array>
+				<integer>0</integer>
+				<integer>1</integer>
+				<integer>2</integer>
+			</array>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Over-Limit Alert Sound</string>
+			<key>key</key>
+			<string>speedAudioAlert</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Show Date/Time</string>
+			<key>key</key>
+			<string>showDate</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Show Battery %</string>
+			<key>key</key>
+			<string>showBattery</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Show Now Playing</string>
+			<key>key</key>
+			<string>showNowPlaying</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSGroupCell</string>
+			<key>label</key>
+			<string>Source App</string>
+			<key>footerText</key>
+			<string>Only Vietmap Live is supported right now. Waze/GOFA/WYN are planned but each needs its own reverse-engineered hook (different app, different mechanism) — see ROADMAP.md.</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Keep Vietmap Live Running in Background</string>
+			<key>key</key>
+			<string>keepSourceAppAlive</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<true/>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSSwitchCell</string>
+			<key>label</key>
+			<string>Auto-Close Vietmap Live on CarPlay Disconnect</string>
+			<key>key</key>
+			<string>autoExitSourceApp</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<false/>
 			<key>PostNotification</key>
 			<string>com.example.splitcarplay/reload</string>
 		</dict>

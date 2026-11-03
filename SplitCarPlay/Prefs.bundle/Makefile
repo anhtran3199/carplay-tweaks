@@ -9,10 +9,10 @@ TARGET = iphone:clang:16.5:14.0
 include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = SplitCarPlayPrefs
-SplitCarPlayPrefs_FILES = SplitCarPlayPrefsListController.m SplitCarPlayAppPickerController.m
+SplitCarPlayPrefs_FILES = SplitCarPlayPrefsListController.m SplitCarPlayAppPickerController.m SplitCarPlayPreviewController.m
 SplitCarPlayPrefs_INSTALL_PATH = /Library/PreferenceBundles
 SplitCarPlayPrefs_CFLAGS = -fobjc-arc
-SplitCarPlayPrefs_FRAMEWORKS = UIKit
+SplitCarPlayPrefs_FRAMEWORKS = UIKit QuartzCore
 SplitCarPlayPrefs_PRIVATE_FRAMEWORKS = Preferences
 
 include $(THEOS_MAKE_PATH)/bundle.mk

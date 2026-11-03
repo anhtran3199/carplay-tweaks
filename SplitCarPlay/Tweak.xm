@@ -40,6 +40,29 @@
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
+#import <AudioToolbox/AudioToolbox.h>
+#import <dlfcn.h>
+
+#pragma mark - MediaRemote (now-playing widget) — real private API, dlopen'd (no framework stub needed)
+//
+//  MediaRemote.framework is how countless jailbreak tweaks (lockscreen
+//  widgets, menu-bar now-playing displays) read what's ACTUALLY playing
+//  system-wide from a different process — MPNowPlayingInfoCenter only
+//  reflects YOUR OWN process's now-playing info, not another app's.
+//  Loaded via dlopen/dlsym rather than linked, same reasoning as every
+//  other private-framework workaround in this project: no SDK stub
+//  needed, and a missing/renamed symbol degrades to "no now-playing
+//  info" instead of a build or runtime failure.
+//
+typedef void (^SplitCarPlayNowPlayingHandler)(NSDictionary *information);
+typedef void (*SplitCarPlayMRGetNowPlayingInfoFunc)(dispatch_queue_t queue, SplitCarPlayNowPlayingHandler handler);
+static SplitCarPlayMRGetNowPlayingInfoFunc SplitCarPlayMRGetNowPlayingInfo = NULL;
+
+static void SplitCarPlayLoadMediaRemote(void) {
+    void *handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
+    if (!handle) return;
+    SplitCarPlayMRGetNowPlayingInfo = (SplitCarPlayMRGetNowPlayingInfoFunc)dlsym(handle, "MRMediaRemoteGetNowPlayingInfo");
+}
 
 #pragma mark - Private class / method forward declarations
 // None of these headers ship publicly; these are just enough surface for the
@@ -122,8 +145,24 @@ static NSString * const kVietmapSharedStatePath = @"/var/mobile/Library/Caches/c
 static NSString * const kVietmapUpdateDarwinNotification = @"com.example.splitcarplay/vietmap-update";
 static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected" if no fresh update
 
+// Bubble "look" — SidePlay2 (a commercial tweak in the same category;
+// see ROADMAP.md) offers several shapes picked in Settings. These three
+// are our own layouts, not a copy of theirs — just matching the idea
+// that one shape doesn't fit everyone's dashboard.
+typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
+    SplitCarPlayBubbleStyleCard = 0,
+    SplitCarPlayBubbleStyleRing = 1,
+    SplitCarPlayBubbleStyleBar = 2,
+};
+
 @interface SpeedBubbleView : UIView
+@property (nonatomic, assign) SplitCarPlayBubbleStyle style; // changing this re-lays-out, no need to recreate the view
+@property (nonatomic, assign) BOOL showDate;
+@property (nonatomic, assign) BOOL showBattery;
+@property (nonatomic, assign) BOOL showNowPlaying;
 - (void)applyState:(NSDictionary *)state; // state may be nil (= never heard from VietmapLiveHook.xm)
+- (void)applyNowPlayingText:(NSString *)text; // nil/empty hides the row
+- (void)tick; // called on the existing refresh timer to update date/battery
 @end
 
 @implementation SpeedBubbleView {
@@ -134,16 +173,25 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     UIImageView *_statusIconView;
     UILabel *_statusLabel;
     UIView *_statusBar;
+    UILabel *_extrasLabel;       // "Card" style: date · battery, one line
+    UILabel *_nowPlayingLabel;   // "Card" style: now-playing, one line
+    CAShapeLayer *_ringLayer;    // "Ring" style only
+    UILabel *_barExtrasLabel;    // "Bar" style: date/battery/now-playing combined
+    BOOL _connected;
+    BOOL _overLimit;
+    NSDateFormatter *_timeFormatter;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
         self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.96];
-        self.layer.cornerRadius = 14;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = 1;
         self.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
+
+        _timeFormatter = [NSDateFormatter new];
+        _timeFormatter.dateFormat = @"HH:mm";
 
         _speedBox = [[UIView alloc] init];
         _speedBox.backgroundColor = [UIColor whiteColor];
@@ -181,6 +229,32 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
         _statusBar.backgroundColor = [UIColor colorWithWhite:0.8 alpha:1];
         [self addSubview:_statusBar];
 
+        _extrasLabel = [[UILabel alloc] init];
+        _extrasLabel.textAlignment = NSTextAlignmentCenter;
+        _extrasLabel.font = [UIFont systemFontOfSize:10];
+        _extrasLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+        [self addSubview:_extrasLabel];
+
+        _nowPlayingLabel = [[UILabel alloc] init];
+        _nowPlayingLabel.textAlignment = NSTextAlignmentCenter;
+        _nowPlayingLabel.font = [UIFont systemFontOfSize:10];
+        _nowPlayingLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+        _nowPlayingLabel.numberOfLines = 1;
+        _nowPlayingLabel.adjustsFontSizeToFitWidth = YES;
+        [self addSubview:_nowPlayingLabel];
+
+        _ringLayer = [CAShapeLayer new];
+        _ringLayer.fillColor = [UIColor clearColor].CGColor;
+        _ringLayer.lineWidth = 5;
+        _ringLayer.hidden = YES;
+        [self.layer addSublayer:_ringLayer];
+
+        _barExtrasLabel = [[UILabel alloc] init];
+        _barExtrasLabel.textAlignment = NSTextAlignmentRight;
+        _barExtrasLabel.font = [UIFont systemFontOfSize:11];
+        _barExtrasLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        [self addSubview:_barExtrasLabel];
+
         _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:_pan];
         self.userInteractionEnabled = YES;
@@ -188,8 +262,36 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     return self;
 }
 
+- (void)setStyle:(SplitCarPlayBubbleStyle)style {
+    _style = style;
+    [self setNeedsLayout];
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
+    switch (self.style) {
+        case SplitCarPlayBubbleStyleRing: [self layoutRingStyle]; return;
+        case SplitCarPlayBubbleStyleBar: [self layoutBarStyle]; return;
+        case SplitCarPlayBubbleStyleCard: default: [self layoutCardStyle]; return;
+    }
+}
+
+- (void)layoutCardStyle {
+    self.layer.cornerRadius = 14;
+    _ringLayer.hidden = YES;
+    _barExtrasLabel.hidden = YES;
+    _speedBox.hidden = NO;
+    _statusIconView.hidden = NO;
+    _statusLabel.hidden = NO;
+    _statusBar.hidden = NO;
+
+    // Ring/Bar styles re-parent these onto `self` directly (see below) --
+    // move them back into _speedBox, whose bounds the frames just below
+    // are expressed relative to.
+    [_speedBox addSubview:_speedLabel];
+    [_speedBox addSubview:_unitLabel];
+    _speedLabel.font = [UIFont boldSystemFontOfSize:28];
+
     CGFloat w = self.bounds.size.width;
     CGFloat pad = 8;
 
@@ -199,11 +301,86 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
 
     CGFloat iconSize = 22;
     _statusIconView.frame = CGRectMake((w - iconSize) / 2.0, CGRectGetMaxY(_speedBox.frame) + 8, iconSize, iconSize);
-
     _statusLabel.frame = CGRectMake(pad, CGRectGetMaxY(_statusIconView.frame) + 4, w - pad * 2, 28);
+
+    CGFloat y = CGRectGetMaxY(_statusLabel.frame) + 2;
+    _extrasLabel.hidden = !(self.showDate || self.showBattery);
+    if (!_extrasLabel.hidden) {
+        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
+        y = CGRectGetMaxY(_extrasLabel.frame);
+    }
+    _nowPlayingLabel.hidden = !self.showNowPlaying || _nowPlayingLabel.text.length == 0;
+    if (!_nowPlayingLabel.hidden) {
+        _nowPlayingLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
+        y = CGRectGetMaxY(_nowPlayingLabel.frame);
+    }
 
     CGFloat barHeight = 4;
     _statusBar.frame = CGRectMake(pad, self.bounds.size.height - barHeight - 6, w - pad * 2, barHeight);
+    _statusBar.layer.cornerRadius = barHeight / 2.0;
+}
+
+- (void)layoutRingStyle {
+    // A compact circle: just the speed number + a colored ring. Extras
+    // (date/battery/now-playing) are deliberately omitted here — the
+    // whole point of this style is to be small.
+    CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height);
+    self.layer.cornerRadius = side / 2.0;
+    _ringLayer.hidden = NO;
+    _barExtrasLabel.hidden = YES;
+    _speedBox.hidden = YES;
+    _extrasLabel.hidden = YES;
+    _nowPlayingLabel.hidden = YES;
+
+    CGRect ringFrame = CGRectMake((self.bounds.size.width - side) / 2.0, (self.bounds.size.height - side) / 2.0, side, side);
+    CGFloat inset = _ringLayer.lineWidth / 2.0 + 2;
+    _ringLayer.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(ringFrame, inset, inset)].CGPath;
+    _ringLayer.frame = self.bounds;
+
+    _speedLabel.frame = CGRectMake(0, side / 2.0 - 20, self.bounds.size.width, 28);
+    [self addSubview:_speedLabel]; // re-parent out of the (hidden) speedBox so it still shows
+    _unitLabel.frame = CGRectMake(0, side / 2.0 + 6, self.bounds.size.width, 14);
+    [self addSubview:_unitLabel];
+
+    _statusIconView.hidden = NO;
+    CGFloat iconSize = 16;
+    _statusIconView.frame = CGRectMake((self.bounds.size.width - iconSize) / 2.0, side - iconSize - 10, iconSize, iconSize);
+    _statusLabel.hidden = YES;
+    _statusBar.hidden = YES;
+}
+
+- (void)layoutBarStyle {
+    self.layer.cornerRadius = self.bounds.size.height / 2.0;
+    _ringLayer.hidden = YES;
+    _speedBox.hidden = YES;
+    _extrasLabel.hidden = YES;
+    _nowPlayingLabel.hidden = YES;
+    _statusLabel.hidden = YES;
+
+    CGFloat h = self.bounds.size.height;
+    CGFloat pad = 10;
+
+    CGFloat iconSize = MIN(16, h - 8);
+    _statusIconView.hidden = NO;
+    _statusIconView.frame = CGRectMake(pad, (h - iconSize) / 2.0, iconSize, iconSize);
+    [self addSubview:_statusIconView];
+
+    CGFloat speedWidth = 70;
+    _speedLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 8, 0, speedWidth, h);
+    _speedLabel.font = [UIFont boldSystemFontOfSize:MIN(22, h * 0.5)];
+    [self addSubview:_speedLabel];
+    _unitLabel.frame = CGRectMake(CGRectGetMaxX(_speedLabel.frame), 0, 36, h);
+    [self addSubview:_unitLabel];
+
+    _barExtrasLabel.hidden = !(self.showDate || self.showBattery || self.showNowPlaying);
+    if (!_barExtrasLabel.hidden) {
+        CGFloat x = CGRectGetMaxX(_unitLabel.frame) + 4;
+        _barExtrasLabel.frame = CGRectMake(x, 0, self.bounds.size.width - x - pad, h);
+    }
+
+    CGFloat barHeight = 3;
+    _statusBar.hidden = NO;
+    _statusBar.frame = CGRectMake(pad, h - barHeight - 3, self.bounds.size.width - pad * 2, barHeight);
     _statusBar.layer.cornerRadius = barHeight / 2.0;
 }
 
@@ -211,6 +388,38 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     CGPoint translation = [pan translationInView:self.superview];
     self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
     [pan setTranslation:CGPointZero inView:self.superview];
+}
+
+- (NSString *)extrasText {
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    if (self.showDate) [parts addObject:[_timeFormatter stringFromDate:[NSDate date]]];
+    if (self.showBattery) {
+        UIDevice *device = [UIDevice currentDevice];
+        if (device.batteryState != UIDeviceBatteryStateUnknown) {
+            [parts addObject:[NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100]];
+        }
+    }
+    return [parts componentsJoinedByString:@" · "];
+}
+
+- (void)tick {
+    // Re-render the date/battery text on a timer (there's no notification
+    // for "a minute passed" or "battery % changed by exactly this much",
+    // so this piggybacks on the existing 2s refresh timer rather than
+    // adding a second one).
+    _extrasLabel.text = [self extrasText];
+    NSMutableArray<NSString *> *barParts = [NSMutableArray new];
+    NSString *extras = [self extrasText];
+    if (extras.length > 0) [barParts addObject:extras];
+    if (self.showNowPlaying && _nowPlayingLabel.text.length > 0) [barParts addObject:_nowPlayingLabel.text];
+    _barExtrasLabel.text = [barParts componentsJoinedByString:@" · "];
+    [self setNeedsLayout];
+}
+
+- (void)applyNowPlayingText:(NSString *)text {
+    _nowPlayingLabel.text = text;
+    [self tick]; // refresh the bar-style combined label too
+    [self setNeedsLayout];
 }
 
 - (void)applyState:(NSDictionary *)state {
@@ -224,11 +433,13 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     NSNumber *timestamp = state[@"timestamp"];
     BOOL connected = timestamp && text.length > 0 &&
         ([[NSDate date] timeIntervalSince1970] - timestamp.doubleValue) < kVietmapStaleAfter;
+    _connected = connected;
+    _overLimit = overLimit;
 
     _speedLabel.text = connected ? text : @"--";
-    _speedBox.layer.borderColor = (connected && overLimit)
-        ? [UIColor systemRedColor].CGColor
-        : [UIColor colorWithWhite:0.75 alpha:1].CGColor;
+    UIColor *accentColor = (connected && overLimit) ? [UIColor systemRedColor] : [UIColor colorWithWhite:0.75 alpha:1];
+    _speedBox.layer.borderColor = accentColor.CGColor;
+    _ringLayer.strokeColor = ((connected && overLimit) ? [UIColor systemRedColor] : [UIColor systemGrayColor]).CGColor;
 
     if (@available(iOS 13.0, *)) {
         _statusIconView.image = [UIImage systemImageNamed:connected ? @"checkmark.circle.fill" : @"xmark.circle"];
@@ -239,6 +450,7 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     _statusBar.backgroundColor = connected
         ? (overLimit ? [UIColor systemRedColor] : [UIColor systemGreenColor])
         : [UIColor colorWithWhite:0.8 alpha:1];
+    [self tick];
 }
 
 @end
@@ -255,6 +467,9 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
 @property (nonatomic, strong) SpeedBubbleView *speedBubble;
 @property (nonatomic, strong) NSTimer *speedBubbleStaleTimer;
 @property (nonatomic, assign) CGFloat splitRatio; // 0..1, left width fraction
+@property (nonatomic, assign) BOOL speedAudioAlertEnabled;
+@property (nonatomic, assign) BOOL autoExitSourceAppEnabled;
+@property (nonatomic, strong) NSDate *lastSpeedAudioAlertAt;
 + (instancetype)sharedInstance;
 - (void)activateOnDisplay:(id)carPlayDisplay;
 - (void)teardown;
@@ -286,6 +501,13 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
         @"splitRatio": @0.5,
         @"showDivider": @YES,
         @"showSpeedBubble": @YES,
+        @"bubbleStyle": @0,
+        @"speedAudioAlert": @YES,
+        @"showDate": @YES,
+        @"showBattery": @YES,
+        @"showNowPlaying": @YES,
+        @"keepSourceAppAlive": @YES,
+        @"autoExitSourceApp": @NO,
     } mutableCopy];
     if (prefs) [merged addEntriesFromDictionary:prefs];
     return merged;
@@ -313,6 +535,24 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     [self layoutContainers];
 
     self.speedBubble.hidden = ![prefs[@"showSpeedBubble"] boolValue];
+    self.speedBubble.style = (SplitCarPlayBubbleStyle)[prefs[@"bubbleStyle"] integerValue];
+    self.speedBubble.showDate = [prefs[@"showDate"] boolValue];
+    self.speedBubble.showBattery = [prefs[@"showBattery"] boolValue];
+    self.speedBubble.showNowPlaying = [prefs[@"showNowPlaying"] boolValue];
+    self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
+    self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
+
+    // Resize (not reposition — keep wherever the user dragged it) to fit
+    // whichever style is active; a Card needs more vertical room for the
+    // extras rows than a compact Ring or a wide-short Bar does.
+    CGRect frame = self.speedBubble.frame;
+    switch (self.speedBubble.style) {
+        case SplitCarPlayBubbleStyleRing: frame.size = CGSizeMake(100, 100); break;
+        case SplitCarPlayBubbleStyleBar: frame.size = CGSizeMake(220, 44); break;
+        case SplitCarPlayBubbleStyleCard: default: frame.size = CGSizeMake(116, 188); break;
+    }
+    self.speedBubble.frame = frame;
+
     if (!self.speedBubble.hidden) [self refreshSpeedBubble];
 }
 
@@ -383,6 +623,33 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
     if (!self.speedBubble || self.speedBubble.hidden) return;
     NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
     [self.speedBubble applyState:state ?: @{}]; // empty state renders as "disconnected"
+    [self.speedBubble tick]; // date/battery/now-playing text — see SpeedBubbleView.tick's own comment
+
+    BOOL overLimit = [state[@"isOverLimit"] boolValue];
+    if (self.speedAudioAlertEnabled && overLimit) {
+        NSTimeInterval sinceLastAlert = self.lastSpeedAudioAlertAt ? -[self.lastSpeedAudioAlertAt timeIntervalSinceNow] : INFINITY;
+        if (sinceLastAlert > 8.0) {
+            AudioServicesPlaySystemSound(1057); // "Tink" — a real, standard SystemSoundID; just an alert tone, nothing fancy
+            self.lastSpeedAudioAlertAt = [NSDate date];
+        }
+    } else if (!overLimit) {
+        self.lastSpeedAudioAlertAt = nil; // next over-limit episode alerts immediately
+    }
+
+    if (self.speedBubble.showNowPlaying && SplitCarPlayMRGetNowPlayingInfo) {
+        __weak SpeedBubbleView *weakBubble = self.speedBubble;
+        SplitCarPlayMRGetNowPlayingInfo(dispatch_get_main_queue(), ^(NSDictionary *information) {
+            NSString *title = information[@"kMRMediaRemoteNowPlayingInfoTitle"];
+            NSString *artist = information[@"kMRMediaRemoteNowPlayingInfoArtist"];
+            NSString *text = nil;
+            if (title.length > 0) {
+                text = artist.length > 0 ? [NSString stringWithFormat:@"%@ — %@", title, artist] : title;
+            }
+            [weakBubble applyNowPlayingText:text];
+        });
+    } else if (!self.speedBubble.showNowPlaying) {
+        [self.speedBubble applyNowPlayingText:nil];
+    }
 }
 
 - (void)layoutContainers {
@@ -496,6 +763,8 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
             return;
         }
 
+        SplitCarPlayLoadMediaRemote();
+
         // Re-check whenever a display connects/disconnects (CarPlay plug/unplug)
         // and whenever the user changes a preference.
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenDidConnectNotification
@@ -509,6 +778,14 @@ static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected"
                                                              queue:nil
                                                         usingBlock:^(NSNotification *note) {
             [[SplitCarPlayController sharedInstance] teardown];
+            if ([[SplitCarPlayController sharedInstance] autoExitSourceAppEnabled]) {
+                // Handled by VietmapLiveHook.xm (this same dylib, running
+                // inside Vietmap Live's own process) — see its header
+                // comment for why a self-exit is safe.
+                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                                      (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
+                                                      NULL, NULL, YES);
+            }
         }];
 
         CFNotificationCenterAddObserver(

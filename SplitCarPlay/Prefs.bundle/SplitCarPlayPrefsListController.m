@@ -40,6 +40,10 @@
 @end
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID);
 
+// Defined in SplitCarPlayPreviewController.m (same bundle/binary).
+@interface SplitCarPlayPreviewController : UIViewController
+@end
+
 static NSString * const kSplitCarPlayPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
 
 @interface SplitCarPlayPrefsListController : PSListController
@@ -73,6 +77,11 @@ static NSString * const kSplitCarPlayPrefsPath = @"/var/mobile/Library/Preferenc
     picker.defaultsKey = key;
     picker.title = title;
     [self.navigationController pushViewController:picker animated:YES];
+}
+
+- (void)openPreview:(id)sender {
+    SplitCarPlayPreviewController *preview = [SplitCarPlayPreviewController new];
+    [self.navigationController pushViewController:preview animated:YES];
 }
 
 // Read by the two PSTitleValueCell rows in Root.plist ("get": these

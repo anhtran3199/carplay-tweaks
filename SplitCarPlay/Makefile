@@ -9,7 +9,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = SplitCarPlay
 SplitCarPlay_FILES = Tweak.xm VietmapLiveHook.xm
 SplitCarPlay_CFLAGS = -fobjc-arc
-SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore
+SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore AudioToolbox
 # No _PRIVATE_FRAMEWORKS here on purpose: every private class in Tweak.xm is
 # resolved dynamically via objc_getClass(...)/runtime messaging rather than
 # imported headers with direct symbol references, so nothing needs to be
