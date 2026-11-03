@@ -8,10 +8,12 @@
 		<string>SplitCarPlayPrefs</string>
 		<key>cell</key>
 		<string>PSLinkCell</string>
+		<key>detail</key>
+		<string>SplitCarPlayPrefsListController</string>
+		<key>isController</key>
+		<true/>
 		<key>label</key>
 		<string>SplitCarPlay</string>
-		<key>isController</key>
-		<false/>
 	</dict>
 </dict>
 </plist>

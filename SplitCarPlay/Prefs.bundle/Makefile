@@ -1,15 +1,19 @@
 include $(THEOS)/makefiles/common.mk
 
 BUNDLE_NAME = SplitCarPlayPrefs
-# No _FILES: this bundle is resource-only (stock PS*Cell specifiers, no
-# custom controller code — Entry.plist already sets isController = false).
-# bundle.mk supports that; Root.plist/Entry.plist just need to live under
-# Resources/ so the default _RESOURCE_DIRS picks them up and copies them
-# to the bundle root (where PreferenceLoader/Settings expect to find them).
+# Needs a real compiled controller: the reference tweak we compared
+# against on-device (CarSplit) registers with isController=true + an
+# actual PSListController subclass -- a resource-only bundle
+# (isController=false, no _FILES) never showed up in Settings in testing.
+SplitCarPlayPrefs_FILES = SplitCarPlayPrefsListController.m
 SplitCarPlayPrefs_INSTALL_PATH = /Library/PreferenceBundles
-# No _FRAMEWORKS/_PRIVATE_FRAMEWORKS either — nothing here compiles or
-# links, so declaring them would risk the same "framework not found" link
-# failure we hit on SplitCarPlay itself if the CI SDK lacks a stub for one.
+SplitCarPlayPrefs_CFLAGS = -fobjc-arc
+SplitCarPlayPrefs_FRAMEWORKS = UIKit
+# No _PRIVATE_FRAMEWORKS = Preferences: PSListController is forward-
+# declared in the .m file and resolved at runtime (inside Settings.app,
+# where this bundle actually loads), so we don't need the CI build SDK to
+# have a Preferences.framework stub -- avoids repeating the
+# "framework not found" link failure we hit on SplitCarPlay itself.
 
 include $(THEOS_MAKE_PATH)/bundle.mk
 
