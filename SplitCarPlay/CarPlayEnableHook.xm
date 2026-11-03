@@ -41,6 +41,16 @@
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 
+// Each .xm file in this project compiles as its own translation unit, so
+// this forward declaration (same shape as the one in
+// SplitCarPlayAppPickerController.m) is needed again here too -- without
+// it, messaging an entirely-undeclared selector on an `id`-typed receiver
+// is a hard error under ARC (confirmed: this is exactly what broke CI).
+@interface LSApplicationWorkspace : NSObject
++ (instancetype)defaultWorkspace;
+- (NSArray *)allInstalledApplications;
+@end
+
 static BOOL SplitCarPlay_RunningInCarPlayApp(void) {
     return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.CarPlayApp"];
 }
