@@ -90,6 +90,26 @@ in, so this list builds on work already validated as the right direction.
       Vietmap Live on CarPlay Disconnect" (off by default — opt-in since
       it's a more surprising action than the others).
 
+## CarPlay app-hosting foundation
+
+- [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,
+      `hostApp:inContainer:replacingExisting:` can likely only ever work
+      for apps that already declare native CarPlay support (Maps, Music,
+      Spotify, Waze, ...); resolving an arbitrary app like YouTube almost
+      certainly fails at iOS's own CarPlay-eligibility check before scene
+      creation is even attempted. Hooks `+[CARApplication
+      _newApplicationLibrary]` and synthesizes a `CRCarPlayAppDeclaration`
+      + a `"CarPlayEnable"` tag for every third-party app, grounded in the
+      open-source (Apache-2.0) carplay-cast project. **Lower confidence
+      than the SidePlay2.dylib-derived parts of this project** — I didn't
+      have carplay-cast's literal source, only a paraphrased description
+      of its class/property names (an AI tool declined to reproduce the
+      file verbatim), so exactly how a declaration gets registered into
+      the library object is a best-effort reconstruction, not confirmed.
+      Logs every step to
+      `/var/mobile/Library/Logs/splitcarplay_carplayenable.log` so a
+      failure is debuggable rather than silent.
+
 ## Other
 
 - [ ] **In-app notifications surfaced on the card** — still not
