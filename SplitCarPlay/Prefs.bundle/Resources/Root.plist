@@ -38,18 +38,36 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSButtonCell</string>
+			<string>PSTitleValueCell</string>
 			<key>label</key>
-			<string>Left App</string>
-			<key>action</key>
-			<string>pickLeftApp:</string>
+			<string>Left App (current)</string>
+			<key>get</key>
+			<string>currentLeftAppName</string>
 		</dict>
 
 		<dict>
 			<key>cell</key>
 			<string>PSButtonCell</string>
 			<key>label</key>
-			<string>Right App</string>
+			<string>Change Left App…</string>
+			<key>action</key>
+			<string>pickLeftApp:</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSTitleValueCell</string>
+			<key>label</key>
+			<string>Right App (current)</string>
+			<key>get</key>
+			<string>currentRightAppName</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
+			<string>PSButtonCell</string>
+			<key>label</key>
+			<string>Change Right App…</string>
 			<key>action</key>
 			<string>pickRightApp:</string>
 		</dict>

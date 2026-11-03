@@ -38,6 +38,9 @@
 @interface SplitCarPlayAppPickerController : UITableViewController
 @property (nonatomic, copy) NSString *defaultsKey;
 @end
+extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID);
+
+static NSString * const kSplitCarPlayPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
 
 @interface SplitCarPlayPrefsListController : PSListController
 @end
@@ -70,6 +73,24 @@
     picker.defaultsKey = key;
     picker.title = title;
     [self.navigationController pushViewController:picker animated:YES];
+}
+
+// Read by the two PSTitleValueCell rows in Root.plist ("get": these
+// selector names) to show which app is currently picked.
+
+- (NSString *)currentLeftAppName {
+    return [self currentAppNameForKey:@"leftBundleID"];
+}
+
+- (NSString *)currentRightAppName {
+    return [self currentAppNameForKey:@"rightBundleID"];
+}
+
+- (NSString *)currentAppNameForKey:(NSString *)key {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kSplitCarPlayPrefsPath];
+    NSString *bundleID = prefs[key];
+    if (bundleID.length == 0) return @"Not set";
+    return SplitCarPlayDisplayNameForBundleID(bundleID) ?: bundleID;
 }
 
 @end

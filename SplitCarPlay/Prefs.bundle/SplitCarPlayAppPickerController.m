@@ -35,7 +35,14 @@
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (NSArray<LSApplicationProxy *> *)allInstalledApplications;
+- (LSApplicationProxy *)applicationProxyForIdentifier:(NSString *)bundleID;
 @end
+
+static LSApplicationWorkspace *SplitCarPlayWorkspace(void) {
+    Class workspaceClass = objc_getClass("LSApplicationWorkspace");
+    if (!workspaceClass || ![workspaceClass respondsToSelector:@selector(defaultWorkspace)]) return nil;
+    return [workspaceClass defaultWorkspace];
+}
 
 static NSString *SplitCarPlayAppBundleID(LSApplicationProxy *app) {
     if ([app respondsToSelector:@selector(bundleIdentifier)]) {
@@ -56,6 +63,41 @@ static NSString *SplitCarPlayAppDisplayName(LSApplicationProxy *app) {
         }
     }
     return SplitCarPlayAppBundleID(app); // last-resort fallback, never nil if bundleIdentifier worked
+}
+
+// Exported (not static) so SplitCarPlayPrefsListController.m can show the
+// currently-selected app's name next to "Left App"/"Right App".
+NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    LSApplicationWorkspace *workspace = SplitCarPlayWorkspace();
+    if (![workspace respondsToSelector:@selector(applicationProxyForIdentifier:)]) return bundleID;
+    LSApplicationProxy *app = [workspace applicationProxyForIdentifier:bundleID];
+    return app ? SplitCarPlayAppDisplayName(app) : bundleID;
+}
+
+// Real, widely-used private API for fetching an app's icon outside of
+// SpringBoard (e.g. App Switcher-style UIs). respondsToSelector:-guarded:
+// if this selector name turns out wrong on this iOS version, icons just
+// don't show (nil) instead of crashing.
+static UIImage *SplitCarPlayAppIcon(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if (![UIImage respondsToSelector:sel]) return nil;
+
+    NSMethodSignature *signature = [UIImage methodSignatureForSelector:sel];
+    if (!signature) return nil;
+    NSInvocation *invocation = [NSInvocation invocationWithMethodSignature:signature];
+    invocation.selector = sel;
+    NSInteger format = 0;
+    CGFloat scale = [UIScreen mainScreen].scale;
+    [invocation setArgument:&bundleID atIndex:2];
+    [invocation setArgument:&format atIndex:3];
+    [invocation setArgument:&scale atIndex:4];
+    [invocation invokeWithTarget:[UIImage class]];
+
+    __unsafe_unretained UIImage *result = nil;
+    [invocation getReturnValue:&result];
+    return result;
 }
 
 #pragma mark - Shared prefs I/O (same contract SplitCarPlay.dylib reads/writes)
@@ -86,13 +128,10 @@ static void SplitCarPlaySetPref(NSString *key, NSString *value) {
 - (void)viewDidLoad {
     [super viewDidLoad];
 
-    Class workspaceClass = objc_getClass("LSApplicationWorkspace");
+    LSApplicationWorkspace *workspace = SplitCarPlayWorkspace();
     NSArray<LSApplicationProxy *> *all = @[];
-    if (workspaceClass && [workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
-        id workspace = [workspaceClass defaultWorkspace];
-        if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
-            all = [workspace allInstalledApplications] ?: @[];
-        }
+    if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+        all = [workspace allInstalledApplications] ?: @[];
     }
 
     NSMutableArray<LSApplicationProxy *> *validApps = [NSMutableArray new];
@@ -127,6 +166,7 @@ static void SplitCarPlaySetPref(NSString *key, NSString *value) {
     cell.textLabel.text = _names[indexPath.row];
     cell.detailTextLabel.text = _bundleIDs[indexPath.row];
     cell.accessoryType = UITableViewCellAccessoryNone;
+    cell.imageView.image = SplitCarPlayAppIcon(_bundleIDs[indexPath.row]);
     return cell;
 }
 
