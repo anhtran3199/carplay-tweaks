@@ -48,7 +48,10 @@ static NSString *SplitCarPlayAppDisplayName(LSApplicationProxy *app) {
     SEL candidates[] = { @selector(localizedName), @selector(displayName), @selector(bundleName) };
     for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
         if ([app respondsToSelector:candidates[i]]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
             NSString *name = [app performSelector:candidates[i]];
+#pragma clang diagnostic pop
             if (name.length > 0) return name;
         }
     }
