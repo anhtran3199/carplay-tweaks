@@ -34,6 +34,11 @@
 - (id)loadSpecifiersFromPlistName:(NSString *)plistName target:(id)target;
 @end
 
+// Defined in SplitCarPlayAppPickerController.m (same bundle/binary).
+@interface SplitCarPlayAppPickerController : UITableViewController
+@property (nonatomic, copy) NSString *defaultsKey;
+@end
+
 @interface SplitCarPlayPrefsListController : PSListController
 @end
 
@@ -44,6 +49,27 @@
         _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
     }
     return _specifiers;
+}
+
+// Pushed manually with plain UINavigationController API from here, rather
+// than via Root.plist's PSLinkCell "detail" auto-push (which crashed --
+// see SplitCarPlayAppPickerController.m's header comment). PSButtonCell's
+// "action" calling a method here is the same pattern CarSplit's own real,
+// working Root.plist uses for its "Reset Layout" button.
+
+- (void)pickLeftApp:(id)sender {
+    [self pushAppPickerWithDefaultsKey:@"leftBundleID" title:@"Left App"];
+}
+
+- (void)pickRightApp:(id)sender {
+    [self pushAppPickerWithDefaultsKey:@"rightBundleID" title:@"Right App"];
+}
+
+- (void)pushAppPickerWithDefaultsKey:(NSString *)key title:(NSString *)title {
+    SplitCarPlayAppPickerController *picker = [[SplitCarPlayAppPickerController alloc] initWithStyle:UITableViewStyleGrouped];
+    picker.defaultsKey = key;
+    picker.title = title;
+    [self.navigationController pushViewController:picker animated:YES];
 }
 
 @end

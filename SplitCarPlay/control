@@ -1,6 +1,6 @@
 Package: com.example.splitcarplay
 Name: SplitCarPlay
-Version: 0.1.6
+Version: 0.1.7
 Architecture: iphoneos-arm
 Description: Side-by-side split screen for two apps on the CarPlay display
 Maintainer: anhtran3199@gmail.com

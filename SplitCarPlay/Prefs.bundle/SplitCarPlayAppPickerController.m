@@ -1,21 +1,28 @@
 //
-//  SplitCarPlayAppPickerController.m
+//  SplitCarPlayAppPickerController.m  (v2 — fixes a crash)
 //
-//  A plain UITableViewController (NOT a PSListController/PSSpecifier
-//  setup) listing every installed app, pushed when the user taps
-//  "Left App"/"Right App" on the main Root.plist page (via PSLinkCell's
-//  "detail" key -- that push mechanism just needs any UIViewController,
-//  so a plain table controller works without touching the trickier
-//  PSSpecifier/PSActionCell machinery).
+//  v1 used Root.plist's PSLinkCell "detail" key to let PreferenceLoader/
+//  Preferences.framework auto-push the picker. That crashed on-device.
+//  Most likely cause: PSLinkCell's push path probably expects the pushed
+//  class to respond to PSListController-specific setup (it may call
+//  something like -setSpecifier: or an unusual initializer after alloc),
+//  which a plain UITableViewController simply doesn't implement --
+//  "unrecognized selector" would exactly match "crashes out to the home
+//  screen" (Settings/Preferences.app force-closing).
 //
-//  App enumeration uses LSApplicationWorkspace, the standard private API
-//  for "list every installed app" on iOS -- used by essentially every
-//  jailbreak tweak that offers an app picker.
+//  v2 sidesteps that entirely: Root.plist's rows are now PSButtonCell
+//  (confirmed-working pattern -- extracted directly from CarSplit's own
+//  real, working Root.plist, which uses exactly this for its "Reset
+//  Layout" button), and SplitCarPlayPrefsListController itself pushes
+//  this picker with the completely standard, no-private-API
+//  UINavigationController -pushViewController:animated: + plain
+//  -initWithStyle:. No PSLinkCell auto-push involved at all.
 //
-//  Picking an app writes straight into the same prefs plist SplitCarPlay
-//  itself reads (/var/mobile/Library/Preferences/com.example.splitcarplay.plist)
-//  and posts the same reload notification the PSSwitchCell/PSSliderCell
-//  rows already use, so SplitCarPlay.dylib picks it up live.
+//  Also defensively respondsToSelector:-guards the LSApplicationProxy
+//  property names (bundleIdentifier is certain; localizedName is the
+//  conventional name but unverified against a real binary the way
+//  everything else in this prefs bundle now is) so a wrong guess there
+//  degrades to a fallback label instead of crashing again.
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -23,14 +30,30 @@
 #pragma mark - Private API (LaunchServices) — real, widely used by app-picker tweaks
 
 @interface LSApplicationProxy : NSObject
-@property (nonatomic, readonly) NSString *bundleIdentifier;
-@property (nonatomic, readonly) NSString *localizedName;
 @end
 
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (NSArray<LSApplicationProxy *> *)allInstalledApplications;
 @end
+
+static NSString *SplitCarPlayAppBundleID(LSApplicationProxy *app) {
+    if ([app respondsToSelector:@selector(bundleIdentifier)]) {
+        return [app performSelector:@selector(bundleIdentifier)];
+    }
+    return nil;
+}
+
+static NSString *SplitCarPlayAppDisplayName(LSApplicationProxy *app) {
+    SEL candidates[] = { @selector(localizedName), @selector(displayName), @selector(bundleName) };
+    for (size_t i = 0; i < sizeof(candidates) / sizeof(candidates[0]); i++) {
+        if ([app respondsToSelector:candidates[i]]) {
+            NSString *name = [app performSelector:candidates[i]];
+            if (name.length > 0) return name;
+        }
+    }
+    return SplitCarPlayAppBundleID(app); // last-resort fallback, never nil if bundleIdentifier worked
+}
 
 #pragma mark - Shared prefs I/O (same contract SplitCarPlay.dylib reads/writes)
 
@@ -45,78 +68,72 @@ static void SplitCarPlaySetPref(NSString *key, NSString *value) {
                                           (__bridge CFStringRef)kReloadNotification, NULL, NULL, YES);
 }
 
-#pragma mark - Base picker
+#pragma mark - Picker (plain UITableViewController, pushed manually -- see header comment)
 
-@interface SplitCarPlayAppPickerBaseController : UITableViewController
-@property (nonatomic, copy) NSArray<LSApplicationProxy *> *apps;
-- (NSString *)defaultsKey; // override in subclass
+@interface SplitCarPlayAppPickerController : UITableViewController
+@property (nonatomic, copy) NSString *defaultsKey;
 @end
 
-@implementation SplitCarPlayAppPickerBaseController
-
-- (NSString *)defaultsKey {
-    return nil; // subclasses override
+@implementation SplitCarPlayAppPickerController {
+    NSArray<LSApplicationProxy *> *_apps;
+    NSArray<NSString *> *_names;
+    NSArray<NSString *> *_bundleIDs;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
 
     Class workspaceClass = objc_getClass("LSApplicationWorkspace");
-    NSArray<LSApplicationProxy *> *all = workspaceClass ? [[workspaceClass defaultWorkspace] allInstalledApplications] : @[];
+    NSArray<LSApplicationProxy *> *all = @[];
+    if (workspaceClass && [workspaceClass respondsToSelector:@selector(defaultWorkspace)]) {
+        id workspace = [workspaceClass defaultWorkspace];
+        if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+            all = [workspace allInstalledApplications] ?: @[];
+        }
+    }
 
-    NSPredicate *hasName = [NSPredicate predicateWithBlock:^BOOL(LSApplicationProxy *app, NSDictionary *bindings) {
-        return app.localizedName.length > 0 && app.bundleIdentifier.length > 0;
-    }];
-    NSArray *filtered = [all filteredArrayUsingPredicate:hasName];
-    self.apps = [filtered sortedArrayUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
-        return [a.localizedName caseInsensitiveCompare:b.localizedName];
+    NSMutableArray<LSApplicationProxy *> *validApps = [NSMutableArray new];
+    for (LSApplicationProxy *app in all) {
+        if (SplitCarPlayAppBundleID(app).length > 0) [validApps addObject:app];
+    }
+    [validApps sortUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
+        return [SplitCarPlayAppDisplayName(a) caseInsensitiveCompare:SplitCarPlayAppDisplayName(b)];
     }];
 
-    [self.tableView registerClass:[UITableViewCell class] forCellReuseIdentifier:@"App"];
+    _apps = validApps;
+    NSMutableArray<NSString *> *names = [NSMutableArray new];
+    NSMutableArray<NSString *> *ids = [NSMutableArray new];
+    for (LSApplicationProxy *app in validApps) {
+        [names addObject:SplitCarPlayAppDisplayName(app)];
+        [ids addObject:SplitCarPlayAppBundleID(app)];
+    }
+    _names = names;
+    _bundleIDs = ids;
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return self.apps.count;
+    return _names.count;
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"App"];
+    static NSString * const kIdentifier = @"App";
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kIdentifier];
     if (!cell) {
-        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:@"App"];
+        cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleSubtitle reuseIdentifier:kIdentifier];
     }
-    LSApplicationProxy *app = self.apps[indexPath.row];
-    cell.textLabel.text = app.localizedName;
-    cell.detailTextLabel.text = app.bundleIdentifier;
+    cell.textLabel.text = _names[indexPath.row];
+    cell.detailTextLabel.text = _bundleIDs[indexPath.row];
     cell.accessoryType = UITableViewCellAccessoryNone;
     return cell;
 }
 
 - (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
     [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    LSApplicationProxy *app = self.apps[indexPath.row];
-    NSString *key = [self defaultsKey];
-    if (key.length > 0 && app.bundleIdentifier.length > 0) {
-        SplitCarPlaySetPref(key, app.bundleIdentifier);
+    NSString *bundleID = _bundleIDs[indexPath.row];
+    if (self.defaultsKey.length > 0 && bundleID.length > 0) {
+        SplitCarPlaySetPref(self.defaultsKey, bundleID);
     }
     [self.navigationController popViewControllerAnimated:YES];
 }
 
-@end
-
-#pragma mark - Leaf controllers (named exactly as referenced by Root.plist's PSLinkCell "detail")
-
-@interface SplitCarPlayAppPickerLeftController : SplitCarPlayAppPickerBaseController
-@end
-
-@implementation SplitCarPlayAppPickerLeftController
-- (NSString *)defaultsKey { return @"leftBundleID"; }
-- (void)viewDidLoad { [super viewDidLoad]; self.title = @"Left App"; }
-@end
-
-@interface SplitCarPlayAppPickerRightController : SplitCarPlayAppPickerBaseController
-@end
-
-@implementation SplitCarPlayAppPickerRightController
-- (NSString *)defaultsKey { return @"rightBundleID"; }
-- (void)viewDidLoad { [super viewDidLoad]; self.title = @"Right App"; }
 @end

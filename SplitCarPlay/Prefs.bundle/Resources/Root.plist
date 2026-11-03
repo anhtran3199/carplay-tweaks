@@ -38,20 +38,20 @@
 
 		<dict>
 			<key>cell</key>
-			<string>PSLinkCell</string>
+			<string>PSButtonCell</string>
 			<key>label</key>
 			<string>Left App</string>
-			<key>detail</key>
-			<string>SplitCarPlayAppPickerLeftController</string>
+			<key>action</key>
+			<string>pickLeftApp:</string>
 		</dict>
 
 		<dict>
 			<key>cell</key>
-			<string>PSLinkCell</string>
+			<string>PSButtonCell</string>
 			<key>label</key>
 			<string>Right App</string>
-			<key>detail</key>
-			<string>SplitCarPlayAppPickerRightController</string>
+			<key>action</key>
+			<string>pickRightApp:</string>
 		</dict>
 
 		<dict>
