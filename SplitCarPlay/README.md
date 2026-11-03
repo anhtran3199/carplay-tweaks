@@ -50,10 +50,12 @@ make install THEOS_DEVICE_IP=<device ip>   # or copy the .deb and install via Si
 
 Settings app → SplitCarPlay (via the PreferenceLoader bundle in `Prefs.bundle/`):
 
-- **Left/Right App Bundle ID** — e.g. `com.apple.Maps`, `com.apple.Music`.
-  (Native CarPlay apps are the safe starting point; truly arbitrary
-  non-CarPlay apps need something like CarBridge/carplay-cast's scene
-  technique anyway, which is what the ADAPT section already uses.)
+- **Left/Right App** — tap to pick from a list of every installed app
+  (via `LSApplicationWorkspace`, the standard private API for enumerating
+  installed apps) instead of typing a bundle ID by hand. (Native CarPlay
+  apps are the safe starting point; truly arbitrary non-CarPlay apps need
+  something like CarBridge/carplay-cast's scene technique anyway, which is
+  what the ADAPT section already uses.)
 - **Split Ratio** — left-pane width as a fraction of the screen.
 - **Show Divider Handle** — drag it on the CarPlay screen to resize live.
 
