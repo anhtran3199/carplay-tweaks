@@ -83,34 +83,70 @@ static void SplitCarPlayLoadMediaRemote(void) {
 - (instancetype)initWithDisplayConfiguration:(FBSDisplayConfiguration *)config;
 @end
 
-// ADAPT — resolver for "give me an app object for this bundle id" varies by
-// iOS version / process. Candidates seen in SpringBoard-family private API:
-// SBApplicationController, LSApplicationWorkspace+LSApplicationProxy.
+// VERIFIED (per carplay-cast, and independently confirmed by extracting the
+// literal ObjC selector strings out of SidePlay2's actual shipped
+// SidePlay2.dylib — a real commercial tweak doing this exact job — via
+// `ar`/`tar`/regex over its data.tar.xz; see git history around where this
+// comment was added for the extraction method). SBApplicationController's
+// own method list is only "sharedInstance"/"applicationWithBundleIdentifier:"
+// in SidePlay2's string table too, matching exactly what we already had.
 @interface SBApplicationController : NSObject
 + (instancetype)sharedInstance;
 - (id)applicationWithBundleIdentifier:(NSString *)bundleID;
 @end
 
-// ADAPT — the scene manager singleton/accessor that owns scene identities for
-// a given display. carplay-cast calls it "displaySceneManager"; the exact
-// accessor (ivar vs singleton vs per-window-scene delegate) needs confirming.
+// VERIFIED class + accessor name (same string-extraction method as above):
+// "+SBSceneManagerCoordinator mainDisplaySceneManager" is a real selector
+// string in SidePlay2.dylib. This was our biggest ADAPT gap before -- we
+// didn't know how a scene manager for OUR window's display was obtained at
+// all. "mainDisplaySceneManager" with no display parameter suggests it's
+// scoped to whichever display the CALLING PROCESS (CarPlayApp, same as us)
+// considers primary, which inside CarPlayApp's own process should just be
+// the CarPlay screen -- but this is inferred from the symbol's shape, not
+// independently confirmed, so still worth confirming against -v output or
+// a crash log on your device.
+@interface SBSceneManagerCoordinator : NSObject
++ (instancetype)mainDisplaySceneManager;
+@end
+
 @interface SBDisplaySceneManager : NSObject
 - (id)_sceneIdentityForApplication:(id)application createPrimaryIfRequired:(BOOL)create;
 - (id)fetchOrCreateApplicationSceneHandleForRequest:(id)request;
 @end
 
-// ADAPT — the request object's real initializer/properties aren't public;
-// this is a plausible shape based on common SB*Request conventions.
+// ADAPT still — the CLASS name "SBApplicationSceneHandleRequest" is
+// confirmed real (present verbatim in SidePlay2.dylib's string table), but
+// no selector matching an init/factory pattern for it showed up in that
+// same extraction, so its exact construction API remains a guess. If this
+// turns out wrong, class-dumping just this one class on-device (now that
+// you at least know the real name to look for) is a much smaller task than
+// finding it from scratch.
 @interface SBApplicationSceneHandleRequest : NSObject
 + (instancetype)requestForApplication:(id)application sceneIdentity:(id)identity;
 @end
 
-// VERIFIED names (per carplay-cast + independently per DashSplit's README)
+// VERIFIED (carplay-cast + DashSplit's README + SidePlay2.dylib's strings
+// all agree on these two names and initWithApplicationSceneHandle:).
 @interface SBDeviceApplicationSceneEntity : NSObject
 - (instancetype)initWithApplicationSceneHandle:(id)handle;
 @end
 
 @interface SBAppViewController : UIViewController
+// VERIFIED: "-SBAppViewController appView" is a real selector string in
+// SidePlay2.dylib -- use this as the actual content view to add as a
+// subview, not the inherited UIViewController.view (which may just be an
+// empty container the real content gets added to internally; appView is
+// what a real shipping tweak doing this exact job reads instead).
+@property (nonatomic, readonly) UIView *appView;
+// VERIFIED selector strings, exact calling convention (who's the receiver,
+// what triggers them) still ADAPT: the scene likely needs to be told it's
+// foreground (to receive touches/render actively) and given a real size
+// (instead of some default) before it looks right inside a half-width
+// container. Guarded with respondsToSelector: everywhere this is used, so
+// a wrong guess about which object answers these just skips the call
+// rather than crashing.
+- (void)setForeground:(BOOL)foreground;
+- (void)_updateReferenceSize:(CGSize)size andOrientation:(NSInteger)orientation;
 - (instancetype)initWithIdentifier:(NSString *)identifier andApplicationSceneEntity:(id)entity;
 @end
 
@@ -717,7 +753,9 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [self layoutContainers];
 }
 
-#pragma mark App hosting — ADAPT path (see header comment)
+#pragma mark App hosting — now grounded in real selector strings pulled
+#pragma mark from SidePlay2.dylib; see the class forward-declarations
+#pragma mark above for exactly what's VERIFIED vs still ADAPT.
 
 // `slot` takes the address of a strong ivar (e.g. &_leftAppVC). Declaring it
 // explicitly `__strong` (rather than the implicit `__autoreleasing` ARC
@@ -743,19 +781,16 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         return;
     }
 
-    // NOTE: how `displaySceneManager` is actually obtained for OUR
-    // UIRootSceneWindow's display is the biggest ADAPT gap here — carplay-
-    // cast has it as an ivar set up during its own window construction.
-    // Likely candidates: a property on UIWindowScene's delegate, or a
-    // display-keyed singleton. Confirm on-device.
     id displaySceneManager = [self displaySceneManagerForCurrentDisplay];
     if (!displaySceneManager) {
-        NSLog(@"[SplitCarPlay] no scene manager for this display yet");
+        NSLog(@"[SplitCarPlay] no scene manager for this display yet (SBSceneManagerCoordinator missing or mainDisplaySceneManager unavailable)");
         return;
     }
 
     id sceneIdentity = [displaySceneManager _sceneIdentityForApplication:application
                                                       createPrimaryIfRequired:YES];
+    // Still ADAPT: SBApplicationSceneHandleRequest's real construction API
+    // (see forward-declaration comment above).
     id request = [objc_getClass("SBApplicationSceneHandleRequest") requestForApplication:application
                                                                              sceneIdentity:sceneIdentity];
     id sceneHandle = [displaySceneManager fetchOrCreateApplicationSceneHandleForRequest:request];
@@ -765,21 +800,42 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     }
 
     id sceneEntity = [[entityClass alloc] initWithApplicationSceneHandle:sceneHandle];
-    UIViewController *appVC = [[appViewControllerClass alloc] initWithIdentifier:bundleID
+    SBAppViewController *appVC = [[appViewControllerClass alloc] initWithIdentifier:bundleID
                                                            andApplicationSceneEntity:sceneEntity];
     if (!appVC) return;
 
+    // Prefer the real content view (appView) over the inherited
+    // UIViewController.view -- see the VERIFIED note on the forward
+    // declaration above. Falls back to .view if appView isn't actually
+    // there on this iOS version.
+    UIView *contentView = [appVC respondsToSelector:@selector(appView)] ? appVC.appView : appVC.view;
+
     [(*slot).view removeFromSuperview];
     *slot = appVC;
-    appVC.view.frame = container.bounds;
-    [container addSubview:appVC.view];
+    contentView.frame = container.bounds;
+    [container addSubview:contentView];
+
+    // Both ADAPT (selector names are real, but which object answers them
+    // and exactly what's needed to make a hosted scene actually render/
+    // receive touches isn't independently confirmed) -- guarded so a wrong
+    // guess just skips the call instead of crashing.
+    if ([appVC respondsToSelector:@selector(setForeground:)]) {
+        [appVC setForeground:YES];
+    }
+    if ([appVC respondsToSelector:@selector(_updateReferenceSize:andOrientation:)]) {
+        [appVC _updateReferenceSize:container.bounds.size andOrientation:0];
+    }
 }
 
 - (id)displaySceneManagerForCurrentDisplay {
-    // ADAPT: placeholder. Replace with the real accessor for your iOS
-    // version once found via class-dump, e.g. something hanging off
-    // self.rootWindow.windowScene, or a shared SBDisplaySceneManager.
-    return nil;
+    // VERIFIED class/selector ("+SBSceneManagerCoordinator
+    // mainDisplaySceneManager" is a real string in SidePlay2.dylib) -- see
+    // the forward-declaration comment above for the one remaining
+    // uncertainty (whether "main" scopes correctly to the CarPlay display
+    // from inside this process).
+    Class coordinatorClass = objc_getClass("SBSceneManagerCoordinator");
+    if (![coordinatorClass respondsToSelector:@selector(mainDisplaySceneManager)]) return nil;
+    return [coordinatorClass mainDisplaySceneManager];
 }
 
 @end

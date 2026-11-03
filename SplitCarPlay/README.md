@@ -21,17 +21,26 @@ split into two tiers, clearly marked in `Tweak.xm`:
   (`src/CRCarplayWindow.mm`), which does the single-app version of this.
   High confidence these class/method names are real.
 
-- **ADAPT** — hosting a *specific app's* live UI inside your own window
-  (`SBApplicationController` → scene identity → `SBApplicationSceneHandle` →
+- **ADAPT, but much better grounded now** — hosting a *specific app's*
+  live UI inside your own window (`SBApplicationController` → scene
+  identity → `SBSceneManagerCoordinator` → `SBApplicationSceneHandle` →
   `SBDeviceApplicationSceneEntity` → `SBAppViewController`) matches names
-  independently cited by `carplay-cast` and by another split-screen tweak's
-  README (DashSplit), so the *class names* are almost certainly right — but
-  the exact argument shapes for the scene-manager accessor and the handle
-  *request* object are undocumented and vary by iOS version. I did not
-  invent fake-sounding symbols to paper over the gap; I left it as a marked
-  TODO so you don't waste time debugging code built on a guess.
+  independently cited by `carplay-cast`, by DashSplit's README, **and**
+  by literal ObjC selector strings extracted directly out of a real
+  shipping commercial tweak's binary (SidePlay2.dylib — `ar`/`tar`/regex
+  over its publicly-downloadable .deb, metadata-level extraction, not a
+  disassembly of their logic; see `ROADMAP.md`). That extraction also
+  filled in the biggest previous gap — `SBSceneManagerCoordinator
+  mainDisplaySceneManager` — and confirmed `SBAppViewController.appView`
+  (not the inherited `.view`) as the real content view, plus
+  `setForeground:`/`_updateReferenceSize:andOrientation:` as the likely
+  calls needed to make a hosted scene actually render at the right size
+  and receive touches. The one piece still genuinely unconfirmed is
+  `SBApplicationSceneHandleRequest`'s exact construction API — no
+  init/factory selector for it showed up in that same string extraction,
+  so it's still a plausible guess, not a confirmed one.
 
-**You will need to close that gap yourself** with `class-dump` or Hopper
+**You will need to close that last gap yourself** with `class-dump` or Hopper
 against `/System/Library/PrivateFrameworks` and the `CarPlayApp` binary on
 your own jailbroken device, for your installed iOS version. That's standard
 jailbreak-tweak-dev practice (it's exactly how the tweaks above were

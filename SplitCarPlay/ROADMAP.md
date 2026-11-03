@@ -49,15 +49,33 @@ in, so this list builds on work already validated as the right direction.
 ## Data source
 
 - [ ] **Multiple speed-source apps, not just Vietmap Live** (Waze, GOFA,
-      WYN). **Deliberately not attempted** — Waze and GOFA aren't Flutter
-      apps like Vietmap Live, so `VietmapLiveHook.xm`'s technique doesn't
-      transfer; each needs its own from-scratch reverse-engineering
-      (unknown mechanism per app) the way Vietmap Live's was done
-      earlier in this project. Guessing a hook mechanism blind for an
-      app we have no reference for is how the UILabel-scraping v1 of
-      `VietmapLiveHook.xm` went wrong the first time — not repeating that
-      without something to ground it in. Settings already explains this
-      (see the "Source App" group's footer text).
+      WYN). Previously deliberately not attempted (no reference to ground
+      a hook mechanism in). **Update:** extracted string tables from
+      SidePlay2's own HUD dylibs (one per source app — same metadata-only
+      extraction method as above, not a disassembly) actually confirm
+      real, concrete targets for all three:
+        - **Waze** (`com.waze.iphone`) — hooks a real, named Waze-internal
+          method, `updateSpeed:timestamp:now:uptime:optionalLimit:`, via
+          `MSHookMessageEx` (classic Substrate function hooking, not
+          Logos `%hook`, since the target class is presumably found at
+          runtime rather than declared at compile time).
+        - **GOFA** (`com.lumi.GOFA`) — thinner evidence: `MSHookMessageEx`
+          + `NSNotificationCenter` + a `locationHook`-named symbol, but no
+          single confirmed selector the way Waze has one.
+        - **WYN** (`com.wynauto.wyn`) — also a Flutter app, same
+          `FlutterMethodChannel`/`setMethodCallHandler:` technique as
+          Vietmap Live. One of their own debug strings is worth noting:
+          *"FlutterMethodChannel setMethodCallHandler: not as expected,
+          just_audio / tts not read"* — i.e. other Flutter plugins in the
+          same app (audio, text-to-speech) register their own channels
+          too, and a global hook can catch the wrong one. The same risk
+          applies to `VietmapLiveHook.xm`, which is exactly why it ships
+          a call logger to verify on-device rather than assume.
+      Waze now has enough to actually attempt (a named method, not a
+      guess); GOFA and WYN are thinner but no longer "nothing to go on."
+      Not implemented yet — this is a sizeable addition (likely one file
+      per app, matching SidePlay2's own one-dylib-per-source structure)
+      better done as its own next step than folded into this pass.
 - [x] **Keep the source app alive in the background** — Vietmap Live
       calls the public `beginBackgroundTaskWithExpirationHandler:` API on
       itself (from `VietmapLiveHook.xm`, injected into its process) when
