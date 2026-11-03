@@ -1,33 +1,49 @@
 //
 //  SplitCarPlayPrefsListController.m
 //
-//  Registers an EMPTY PSListController subclass -- no custom -specifiers
-//  override. A prior version added one (calling
-//  -loadSpecifiersFromPlistName:target: via performSelector:withObject:
-//  withObject:), which got far enough to show the row in Settings but
-//  opened to a blank page -- the override itself is the most likely
-//  culprit (wrong selector arity/behavior assumed from memory, not
-//  verified against a real binary). The stock PSListController already
-//  auto-loads "Root.plist" by convention when a subclass adds nothing of
-//  its own, which is why so many real prefs bundles ship a totally empty
-//  controller class -- so try relying on that default before writing any
-//  more custom loading logic.
+//  Statically subclasses the real PSListController (Preferences.framework)
+//  and loads Root.plist. Two earlier approaches were tried and both opened
+//  to a blank page on-device:
+//   1. A static subclass overriding -specifiers via
+//      performSelector:withObject:withObject: -- plausible but unverified
+//      from memory.
+//   2. An empty class built purely at runtime via objc_allocateClassPair
+//      (worked around a missing Preferences.framework stub at the time) --
+//      also blank, likely because a dynamically-allocated class with zero
+//      of its own methods has no code living in this bundle's own Mach-O
+//      image, which may break NSBundle-based "which bundle is this
+//      Root.plist in" resolution that PSListController relies on
+//      internally.
 //
-//  Built via the ObjC runtime API (not `@interface X : PSListController`)
-//  because the CI build SDK has no Preferences.framework stub to
-//  statically link against -- see git history for the earlier attempts.
+//  The CI workflow now installs a patched SDK (theos/sdks release asset)
+//  specifically so Preferences.framework is linkable, making proper
+//  static subclassing possible again -- confirmed as the right shape by
+//  extracting CarSplit's real working prefs bundle (doguner1/repo): it
+//  statically subclasses PSListController too, isController=true, and its
+//  settings page renders correctly on this same device.
 //
 #import <UIKit/UIKit.h>
-#import <objc/runtime.h>
 
-__attribute__((constructor))
-static void SplitCarPlayPrefsListControllerInit(void) {
-    Class superclass = objc_getClass("PSListController");
-    if (!superclass) return;
-    if (objc_getClass("SplitCarPlayPrefsListController")) return; // already registered
-
-    Class newClass = objc_allocateClassPair(superclass, "SplitCarPlayPrefsListController", 0);
-    if (!newClass) return;
-
-    objc_registerClassPair(newClass);
+// Forward-declared rather than #import <Preferences/PSListController.h> --
+// the patched SDK we link against ships the .tbd needed to resolve this
+// class's symbol, but may not ship a matching header, so we don't depend
+// on one existing.
+@interface PSListController : UIViewController {
+    NSArray *_specifiers;
 }
+- (id)loadSpecifiersFromPlistName:(NSString *)plistName target:(id)target;
+@end
+
+@interface SplitCarPlayPrefsListController : PSListController
+@end
+
+@implementation SplitCarPlayPrefsListController
+
+- (NSArray *)specifiers {
+    if (!_specifiers) {
+        _specifiers = [self loadSpecifiersFromPlistName:@"Root" target:self];
+    }
+    return _specifiers;
+}
+
+@end

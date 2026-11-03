@@ -24,6 +24,25 @@ jobs:
       - name: Setup Theos
         uses: waruhachi/theos-action@v2.6.5
 
+      # The SDK theos-action's default setup resolves as "latest" turned
+      # out to be the macOS runner's own bundled Xcode SDK (confirmed in
+      # an earlier build's error path: .../Xcode_26.6.app/.../iPhoneOS26.5.sdk),
+      # which -- like every official Apple SDK since Xcode 7.3 -- ships
+      # zero private-framework stubs. That's why linking against
+      # Preferences.framework (needed to statically subclass
+      # PSListController for the Settings prefs bundle) failed with
+      # "framework not found". theos/sdks' own release assets are
+      # patched to include those stubs; installing one explicitly and
+      # pointing Prefs.bundle's TARGET at it by exact version (not
+      # "latest") fixes that.
+      - name: Install a private-framework-patched iOS SDK (for Preferences.framework)
+        run: |
+          curl -fsSL -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+            https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
+          mkdir -p "$THEOS/sdks"
+          tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
+          ls "$THEOS/sdks"
+
       # THEOS_PACKAGE_SCHEME=rootless targets modern rootless jailbreaks
       # (Dopamine, roothide, ...) -- the ones this repo is actually meant
       # for (confirmed target device: iPhone 7, iOS 15.8.8, Dopamine 2).
