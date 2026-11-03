@@ -23,6 +23,8 @@
 			<string>Enabled</string>
 			<key>key</key>
 			<string>enabled</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
 			<key>default</key>
 			<true/>
 			<key>PostNotification</key>
@@ -86,6 +88,8 @@
 			<string>Split Ratio (Left Width %)</string>
 			<key>key</key>
 			<string>splitRatio</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
 			<key>default</key>
 			<real>0.5</real>
 			<key>min</key>
@@ -103,6 +107,8 @@
 			<string>Show Divider Handle</string>
 			<key>key</key>
 			<string>showDivider</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
 			<key>default</key>
 			<true/>
 			<key>PostNotification</key>
@@ -125,6 +131,8 @@
 			<string>Show Speed Bubble</string>
 			<key>key</key>
 			<string>showSpeedBubble</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
 			<key>default</key>
 			<true/>
 			<key>PostNotification</key>
