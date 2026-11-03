@@ -1,6 +1,6 @@
 Package: com.example.vietmaplivexport
 Name: VietmapLiveExport
-Version: 0.1.0
+Version: 0.1.1
 Architecture: iphoneos-arm
 Description: Exports Vietmap Live's current speed-limit warning to a shared file for other tweaks (e.g. SplitCarPlay's speed bubble)
 Maintainer: anhtran3199@gmail.com
