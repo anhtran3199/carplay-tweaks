@@ -35,7 +35,6 @@
 @interface LSApplicationWorkspace : NSObject
 + (instancetype)defaultWorkspace;
 - (NSArray<LSApplicationProxy *> *)allInstalledApplications;
-- (LSApplicationProxy *)applicationProxyForIdentifier:(NSString *)bundleID;
 @end
 
 static LSApplicationWorkspace *SplitCarPlayWorkspace(void) {
@@ -67,12 +66,22 @@ static NSString *SplitCarPlayAppDisplayName(LSApplicationProxy *app) {
 
 // Exported (not static) so SplitCarPlayPrefsListController.m can show the
 // currently-selected app's name next to "Left App"/"Right App".
+//
+// Deliberately reuses -allInstalledApplications + a manual bundleID scan
+// rather than -applicationProxyForIdentifier: (a separate, less-certain
+// selector) -- the picker list already relies on allInstalledApplications
+// working, so searching that same array keeps this on one verified path
+// instead of two.
 NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID) {
     if (bundleID.length == 0) return nil;
     LSApplicationWorkspace *workspace = SplitCarPlayWorkspace();
-    if (![workspace respondsToSelector:@selector(applicationProxyForIdentifier:)]) return bundleID;
-    LSApplicationProxy *app = [workspace applicationProxyForIdentifier:bundleID];
-    return app ? SplitCarPlayAppDisplayName(app) : bundleID;
+    if (![workspace respondsToSelector:@selector(allInstalledApplications)]) return bundleID;
+    for (LSApplicationProxy *app in [workspace allInstalledApplications]) {
+        if ([SplitCarPlayAppBundleID(app) isEqualToString:bundleID]) {
+            return SplitCarPlayAppDisplayName(app);
+        }
+    }
+    return bundleID; // not found (e.g. app was uninstalled) -- show the raw ID rather than nothing
 }
 
 // Real, widely-used private API for fetching an app's icon outside of
