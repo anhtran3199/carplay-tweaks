@@ -1,44 +1,24 @@
 //
 //  SplitCarPlayPrefsListController.m
 //
-//  Registers a PSListController subclass that just loads Root.plist.
+//  Registers an EMPTY PSListController subclass -- no custom -specifiers
+//  override. A prior version added one (calling
+//  -loadSpecifiersFromPlistName:target: via performSelector:withObject:
+//  withObject:), which got far enough to show the row in Settings but
+//  opened to a blank page -- the override itself is the most likely
+//  culprit (wrong selector arity/behavior assumed from memory, not
+//  verified against a real binary). The stock PSListController already
+//  auto-loads "Root.plist" by convention when a subclass adds nothing of
+//  its own, which is why so many real prefs bundles ship a totally empty
+//  controller class -- so try relying on that default before writing any
+//  more custom loading logic.
 //
-//  WHY THIS IS BUILT WITH RAW OBJC RUNTIME CALLS INSTEAD OF
-//  `@interface X : PSListController`
-//
-//  Statically subclassing a forward-declared class (`@interface X : Y`)
-//  makes the linker require Y's real symbol (_OBJC_CLASS_$_Y) to be
-//  resolvable at BUILD time -- even though PSListController only truly
-//  exists at runtime inside Settings.app/Preferences.app. We tried
-//  linking against Preferences.framework (where PSListController lives)
-//  to satisfy that, but the CI build SDK doesn't ship a stub for it
-//  either (confirmed: "ld: framework 'Preferences' not found").
-//
-//  So instead this builds the subclass entirely at runtime with the ObjC
-//  runtime API (objc_allocateClassPair/class_addMethod/
-//  objc_registerClassPair), resolving the real PSListController class by
-//  NAME via objc_getClass(), the same pattern the main SplitCarPlay.dylib
-//  already uses for other private classes. That needs zero static
-//  linking against any private framework -- only UIKit.
+//  Built via the ObjC runtime API (not `@interface X : PSListController`)
+//  because the CI build SDK has no Preferences.framework stub to
+//  statically link against -- see git history for the earlier attempts.
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
-
-static NSArray *SplitCarPlayPrefs_specifiers(id self, SEL _cmd) {
-    static NSArray *specifiers = nil;
-    if (!specifiers) {
-        // loadSpecifiersFromPlistName:target: takes exactly two object
-        // arguments, which -performSelector:withObject:withObject:
-        // supports directly -- avoids needing a raw objc_msgSend cast.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-        specifiers = [self performSelector:@selector(loadSpecifiersFromPlistName:target:)
-                                 withObject:@"Root"
-                                 withObject:self];
-#pragma clang diagnostic pop
-    }
-    return specifiers;
-}
 
 __attribute__((constructor))
 static void SplitCarPlayPrefsListControllerInit(void) {
@@ -49,6 +29,5 @@ static void SplitCarPlayPrefsListControllerInit(void) {
     Class newClass = objc_allocateClassPair(superclass, "SplitCarPlayPrefsListController", 0);
     if (!newClass) return;
 
-    class_addMethod(newClass, @selector(specifiers), (IMP)SplitCarPlayPrefs_specifiers, "@@:");
     objc_registerClassPair(newClass);
 }
