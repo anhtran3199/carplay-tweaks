@@ -121,7 +121,7 @@
 			<key>label</key>
 			<string>Speed Bubble</string>
 			<key>footerText</key>
-			<string>Mirrors Vietmap Live's own speed-limit warning (not raw GPS). Requires the companion tweak VietmapLiveExport to also be installed and Vietmap Live to be running.</string>
+			<string>Mirrors Vietmap Live's own current speed + speed-limit warning (not raw GPS). Requires Vietmap Live to be installed and running.</string>
 		</dict>
 
 		<dict>
