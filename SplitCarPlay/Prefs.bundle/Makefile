@@ -9,11 +9,15 @@ SplitCarPlayPrefs_FILES = SplitCarPlayPrefsListController.m
 SplitCarPlayPrefs_INSTALL_PATH = /Library/PreferenceBundles
 SplitCarPlayPrefs_CFLAGS = -fobjc-arc
 SplitCarPlayPrefs_FRAMEWORKS = UIKit
-# No _PRIVATE_FRAMEWORKS = Preferences: PSListController is forward-
-# declared in the .m file and resolved at runtime (inside Settings.app,
-# where this bundle actually loads), so we don't need the CI build SDK to
-# have a Preferences.framework stub -- avoids repeating the
-# "framework not found" link failure we hit on SplitCarPlay itself.
+# Statically subclassing PSListController (@interface X : PSListController)
+# needs its _OBJC_CLASS_$_PSListController symbol at LINK time too, not
+# just at runtime -- forward-declaring the interface alone wasn't enough
+# (confirmed: CI failed with "Undefined symbols ... PSListController").
+# Preferences.framework is about the most common private framework in the
+# whole tweak ecosystem (every PSListController-based prefs bundle needs
+# it), so unlike BackBoardServices et al. earlier, the community SDK is
+# expected to ship a stub for it.
+SplitCarPlayPrefs_PRIVATE_FRAMEWORKS = Preferences
 
 include $(THEOS_MAKE_PATH)/bundle.mk
 
