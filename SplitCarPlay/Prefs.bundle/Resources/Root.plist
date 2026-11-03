@@ -4,7 +4,7 @@
 <dict>
 	<key>title</key>
 	<string>SplitCarPlay</string>
-	<key>specifiers</key>
+	<key>items</key>
 	<array>
 
 		<dict>
