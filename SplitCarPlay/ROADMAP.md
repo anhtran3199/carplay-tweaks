@@ -150,6 +150,39 @@ in, so this list builds on work already validated as the right direction.
       Both are purely cosmetic/UI, same category as the title-bar dots
       above — no new private API involved.
 
+- [x] **Speed bubble: drag anywhere + pinch to resize** — the real
+      `SpeedBubbleView` (`Tweak.xm`) already supported free dragging;
+      the Settings "Mô phỏng" bubble didn't (it was always re-positioned
+      by the Left/Right formula on every layout pass). Added:
+        - A pinch gesture on the bubble in both places, applied as a
+          `CGAffineTransform` scale (not a frame/bounds resize) so
+          everything — text included — scales uniformly; clamped to
+          [0.6, 1.6]. Persisted to a shared `bubbleScale` pref (also a
+          new "Bubble Scale" slider in Settings, same pattern as "Split
+          Ratio"), read by the real CarPlay bubble too.
+        - A pan gesture on the Preview's bubble (the real one already
+          had this) that stops the Left/Right auto-positioning once the
+          user has actually dragged it — picking a new Left/Right or
+          style still re-homes it, matching the real bubble's existing
+          behavior.
+      Fixed a related correctness issue this surfaced: code that read or
+      set `.frame` directly is undefined (per Apple's own docs) once a
+      view's `.transform` isn't the identity transform — switched the
+      bubble-resize-on-style-change code in both `Tweak.xm` and the
+      Preview to `.bounds`/`.center` instead.
+- [x] **Speed card visual pass matching reference screenshots** — split
+      the single "date · battery" line into two stacked rows ("T5,
+      5/11" / a battery-level-matched SF Symbol + "77%"), replaced the
+      generic HH:mm clock with a weekday+date format matching the
+      screenshots exactly, and added a dashed-circle heading indicator
+      below the speed (always shows "--" — there's no real compass/
+      heading data source wired up, Vietmap Live's shared state file
+      only has speed/limit; included for visual parity, not a feature
+      claim). Also: the title bar (3 dots etc.) now hides itself once a
+      real app-switcher snapshot is showing, matching screenshots where
+      a *loaded* app has no such bar but a *still-loading/picker* one
+      does.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

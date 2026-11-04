@@ -58,6 +58,17 @@ typedef void (^SplitCarPlayNowPlayingHandler)(NSDictionary *information);
 typedef void (*SplitCarPlayMRGetNowPlayingInfoFunc)(dispatch_queue_t queue, SplitCarPlayNowPlayingHandler handler);
 static SplitCarPlayMRGetNowPlayingInfoFunc SplitCarPlayMRGetNowPlayingInfo = NULL;
 
+// Write-side counterpart to -loadPreferences below -- used only for the
+// pinch-to-resize callback, since that's the one piece of state this
+// process needs to persist on its own rather than just reading what
+// Settings already wrote.
+static void SplitCarPlayWritePref(NSString *key, id value) {
+    NSString *path = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
+    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary new];
+    prefs[key] = value;
+    [prefs writeToFile:path atomically:YES];
+}
+
 static void SplitCarPlayLoadMediaRemote(void) {
     void *handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
     if (!handle) return;
@@ -191,11 +202,44 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     SplitCarPlayBubbleStyleBar = 2,
 };
 
+// "T5, 5/11" -- weekday abbreviation + day/month, matching the reference
+// screenshot's date format exactly (not the generic HH:mm clock this
+// used to show).
+static NSString *SplitCarPlayWeekdayDateString(NSDate *date) {
+    NSDateComponents *comps = [[NSCalendar currentCalendar] components:(NSCalendarUnitWeekday | NSCalendarUnitDay | NSCalendarUnitMonth)
+                                                                fromDate:date];
+    NSArray<NSString *> *weekdayNames = @[@"CN", @"T2", @"T3", @"T4", @"T5", @"T6", @"T7"]; // NSDateComponents.weekday: 1=Sunday
+    NSString *weekday = weekdayNames[(comps.weekday - 1) % 7];
+    return [NSString stringWithFormat:@"%@, %ld/%ld", weekday, (long)comps.day, (long)comps.month];
+}
+
+// SF Symbol battery glyph matched to the current level -- nil-safe (an
+// unavailable symbol name just means no icon, not a crash).
+static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
+    NSString *name = level >= 0.95 ? @"battery.100"
+                    : level >= 0.70 ? @"battery.75"
+                    : level >= 0.45 ? @"battery.50"
+                    : level >= 0.20 ? @"battery.25"
+                    : @"battery.0";
+    if (@available(iOS 13.0, *)) {
+        return [UIImage systemImageNamed:name];
+    }
+    return nil;
+}
+
 @interface SpeedBubbleView : UIView
 @property (nonatomic, assign) SplitCarPlayBubbleStyle style; // changing this re-lays-out, no need to recreate the view
 @property (nonatomic, assign) BOOL showDate;
 @property (nonatomic, assign) BOOL showBattery;
 @property (nonatomic, assign) BOOL showNowPlaying;
+// Uniform resize via pinch, applied as a CGAffineTransform (not a frame/
+// bounds resize) -- scales everything, fonts included, without needing
+// -layoutSubviews' per-style code to know about a separate size scale.
+// Clamped to [0.6, 1.6]. onScaleChanged fires once per gesture (on end),
+// not on every pinch delta, so the caller can persist without spamming
+// disk writes.
+@property (nonatomic, assign) CGFloat scale;
+@property (nonatomic, copy) void (^onScaleChanged)(CGFloat scale);
 - (void)applyState:(NSDictionary *)state; // state may be nil (= never heard from VietmapLiveHook.xm)
 - (void)applyNowPlayingText:(NSString *)text; // nil/empty hides the row
 - (void)tick; // called on the existing refresh timer to update date/battery
@@ -203,20 +247,26 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 
 @implementation SpeedBubbleView {
     UIPanGestureRecognizer *_pan;
+    UIPinchGestureRecognizer *_pinch;
+    CGFloat _currentScale;
     UIView *_speedBox;
     UILabel *_speedLabel;
     UILabel *_unitLabel;
     UIImageView *_statusIconView;
     UILabel *_statusLabel;
     UIView *_statusBar;
-    UILabel *_extrasLabel;       // "Card" style: date · battery, one line
+    UILabel *_extrasLabel;       // "Card" style: date, its own line
+    UIImageView *_batteryIconView; // "Card" style: battery glyph (SF Symbol, level-matched)
+    UILabel *_batteryLabel;      // "Card" style: battery %, its own line (next to the icon)
+    UIView *_compassView;        // "Card" style: dashed circle, matches the reference screenshot's heading indicator
+    CAShapeLayer *_compassDashLayer;
+    UILabel *_compassLabel;      // "--" -- no real heading data source, so always the placeholder dashes
     UILabel *_nowPlayingLabel;   // "Card" style: now-playing, one line
     CAShapeLayer *_ringLayer;    // "Ring" style only
     CAShapeLayer *_maskLayer;    // rounded-corner clip (a mask, not masksToBounds, so the shadow below isn't clipped too)
     UILabel *_barExtrasLabel;    // "Bar" style: date/battery/now-playing combined
     BOOL _connected;
     BOOL _overLimit;
-    NSDateFormatter *_timeFormatter;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -238,8 +288,6 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         self.layer.shadowRadius = 6;
         self.layer.shadowOffset = CGSizeMake(0, 2);
 
-        _timeFormatter = [NSDateFormatter new];
-        _timeFormatter.dateFormat = @"HH:mm";
 
         _speedBox = [[UIView alloc] init];
         _speedBox.backgroundColor = [UIColor whiteColor];
@@ -277,11 +325,50 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         _statusBar.backgroundColor = [UIColor colorWithWhite:0.8 alpha:1];
         [self addSubview:_statusBar];
 
+        // Date on its own line, left-aligned -- matches the reference
+        // screenshot ("T5, 5/11" / "77%" stacked, not combined) rather
+        // than the single centered "date · battery" line this used to be.
         _extrasLabel = [[UILabel alloc] init];
-        _extrasLabel.textAlignment = NSTextAlignmentCenter;
-        _extrasLabel.font = [UIFont systemFontOfSize:10];
-        _extrasLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+        _extrasLabel.textAlignment = NSTextAlignmentLeft;
+        _extrasLabel.font = [UIFont systemFontOfSize:11];
+        _extrasLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
         [self addSubview:_extrasLabel];
+
+        // Battery row: SF Symbol glyph (level-matched in -extrasText/
+        // -tick, not a fixed icon) + percentage text, its own line.
+        _batteryIconView = [[UIImageView alloc] init];
+        _batteryIconView.contentMode = UIViewContentModeScaleAspectFit;
+        _batteryIconView.tintColor = [UIColor colorWithWhite:0.4 alpha:1];
+        [self addSubview:_batteryIconView];
+
+        _batteryLabel = [[UILabel alloc] init];
+        _batteryLabel.textAlignment = NSTextAlignmentLeft;
+        _batteryLabel.font = [UIFont systemFontOfSize:11];
+        _batteryLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        [self addSubview:_batteryLabel];
+
+        // Dashed-circle heading indicator below the speed, matching the
+        // reference screenshot -- always shows "--" since there's no real
+        // compass/heading data source hooked up (Vietmap Live's shared
+        // state file only has speed/limit, see VietmapLiveHook.xm), but
+        // included for visual parity rather than left out entirely.
+        _compassView = [[UIView alloc] init];
+        _compassView.backgroundColor = [UIColor clearColor];
+        [self addSubview:_compassView];
+
+        _compassDashLayer = [CAShapeLayer new];
+        _compassDashLayer.fillColor = [UIColor clearColor].CGColor;
+        _compassDashLayer.strokeColor = [UIColor colorWithWhite:0.6 alpha:1].CGColor;
+        _compassDashLayer.lineWidth = 1.5;
+        _compassDashLayer.lineDashPattern = @[@3, @3];
+        [_compassView.layer addSublayer:_compassDashLayer];
+
+        _compassLabel = [[UILabel alloc] init];
+        _compassLabel.text = @"--";
+        _compassLabel.textAlignment = NSTextAlignmentCenter;
+        _compassLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        _compassLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        [_compassView addSubview:_compassLabel];
 
         _nowPlayingLabel = [[UILabel alloc] init];
         _nowPlayingLabel.textAlignment = NSTextAlignmentCenter;
@@ -305,9 +392,32 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 
         _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
         [self addGestureRecognizer:_pan];
+        _pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+        [self addGestureRecognizer:_pinch];
         self.userInteractionEnabled = YES;
+        _currentScale = 1.0;
     }
     return self;
+}
+
+- (void)setScale:(CGFloat)scale {
+    _currentScale = MAX(0.6, MIN(1.6, scale));
+    self.transform = CGAffineTransformMakeScale(_currentScale, _currentScale);
+}
+
+- (CGFloat)scale {
+    return _currentScale;
+}
+
+- (void)handlePinch:(UIPinchGestureRecognizer *)pinch {
+    if (pinch.state == UIGestureRecognizerStateChanged) {
+        CGFloat candidate = MAX(0.6, MIN(1.6, _currentScale * pinch.scale));
+        self.transform = CGAffineTransformMakeScale(candidate, candidate);
+    } else if (pinch.state == UIGestureRecognizerStateEnded || pinch.state == UIGestureRecognizerStateCancelled) {
+        _currentScale = MAX(0.6, MIN(1.6, _currentScale * pinch.scale));
+        self.transform = CGAffineTransformMakeScale(_currentScale, _currentScale);
+        if (self.onScaleChanged) self.onScaleChanged(_currentScale);
+    }
 }
 
 - (void)setStyle:(SplitCarPlayBubbleStyle)style {
@@ -335,6 +445,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     _ringLayer.hidden = YES;
     _barExtrasLabel.hidden = YES;
     _speedBox.hidden = NO;
+    _compassView.hidden = NO;
     _statusIconView.hidden = NO;
     _statusLabel.hidden = NO;
     _statusBar.hidden = NO;
@@ -353,26 +464,43 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     CGFloat pad = 8;
     CGFloat y = pad;
 
-    // Date/battery row at the TOP, above the speed readout (matches
-    // Vietmap Live's own "Mô phỏng" preview layout, which puts date +
-    // battery above the big speed number).
-    _extrasLabel.hidden = !(self.showDate || self.showBattery);
+    // Date and battery on their OWN lines (matches the reference
+    // screenshot's "T5, 5/11" / "77%" stacked rows, not a single combined
+    // "date · battery" line), above the speed readout -- same placement
+    // idea as before, just split in two.
+    _extrasLabel.hidden = !self.showDate;
     if (!_extrasLabel.hidden) {
-        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
-        y = CGRectGetMaxY(_extrasLabel.frame) + 2;
+        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 14);
+        y = CGRectGetMaxY(_extrasLabel.frame) + 1;
+    }
+    BOOL showBatteryRow = self.showBattery && !_batteryLabel.hidden;
+    if (showBatteryRow) {
+        CGFloat iconSize = 12;
+        _batteryIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
+        _batteryLabel.frame = CGRectMake(CGRectGetMaxX(_batteryIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_batteryIconView.frame) - 4, 14);
+        y = CGRectGetMaxY(_batteryLabel.frame) + 4;
     }
 
     _speedBox.frame = CGRectMake(pad, y, w - pad * 2, 52);
     _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
     _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
-    y = CGRectGetMaxY(_speedBox.frame) + 6;
+    y = CGRectGetMaxY(_speedBox.frame) + 8;
+
+    // Dashed-circle heading indicator, matching the reference screenshot
+    // -- see the ivar comment on _compassView for why it's always "--".
+    CGFloat compassSize = MIN(60, w - pad * 2);
+    _compassView.frame = CGRectMake((w - compassSize) / 2.0, y, compassSize, compassSize);
+    _compassLabel.frame = _compassView.bounds;
+    _compassDashLayer.frame = _compassView.bounds;
+    _compassDashLayer.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(_compassView.bounds, 1, 1)].CGPath;
+    y = CGRectGetMaxY(_compassView.frame) + 8;
 
     // Compact one-line status: a small dot-style icon + short text,
     // instead of a big icon with two lines of text underneath it.
-    CGFloat iconSize = 14;
-    _statusIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
-    _statusLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_statusIconView.frame) - 4, iconSize + 2);
-    y += iconSize + 6;
+    CGFloat statusIconSize = 14;
+    _statusIconView.frame = CGRectMake(pad, y + 1, statusIconSize, statusIconSize);
+    _statusLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_statusIconView.frame) - 4, statusIconSize + 2);
+    y += statusIconSize + 6;
 
     _nowPlayingLabel.hidden = !self.showNowPlaying || _nowPlayingLabel.text.length == 0;
     if (!_nowPlayingLabel.hidden) {
@@ -395,6 +523,9 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     _barExtrasLabel.hidden = YES;
     _speedBox.hidden = YES;
     _extrasLabel.hidden = YES;
+    _batteryIconView.hidden = YES;
+    _batteryLabel.hidden = YES;
+    _compassView.hidden = YES;
     _nowPlayingLabel.hidden = YES;
 
     CGRect ringFrame = CGRectMake((self.bounds.size.width - side) / 2.0, (self.bounds.size.height - side) / 2.0, side, side);
@@ -419,6 +550,9 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     _ringLayer.hidden = YES;
     _speedBox.hidden = YES;
     _extrasLabel.hidden = YES;
+    _batteryIconView.hidden = YES;
+    _batteryLabel.hidden = YES;
+    _compassView.hidden = YES;
     _nowPlayingLabel.hidden = YES;
     _statusLabel.hidden = YES;
 
@@ -455,9 +589,11 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [pan setTranslation:CGPointZero inView:self.superview];
 }
 
+// Used only by the "Bar" style's single combined line -- "Card" style
+// shows date and battery as two separate rows instead (see -tick below).
 - (NSString *)extrasText {
     NSMutableArray<NSString *> *parts = [NSMutableArray new];
-    if (self.showDate) [parts addObject:[_timeFormatter stringFromDate:[NSDate date]]];
+    if (self.showDate) [parts addObject:SplitCarPlayWeekdayDateString([NSDate date])];
     if (self.showBattery) {
         UIDevice *device = [UIDevice currentDevice];
         if (device.batteryState != UIDeviceBatteryStateUnknown) {
@@ -472,7 +608,17 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     // for "a minute passed" or "battery % changed by exactly this much",
     // so this piggybacks on the existing 2s refresh timer rather than
     // adding a second one).
-    _extrasLabel.text = [self extrasText];
+    _extrasLabel.text = self.showDate ? SplitCarPlayWeekdayDateString([NSDate date]) : nil;
+
+    UIDevice *device = [UIDevice currentDevice];
+    BOOL hasBattery = self.showBattery && device.batteryState != UIDeviceBatteryStateUnknown;
+    if (hasBattery) {
+        _batteryLabel.text = [NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100];
+        _batteryIconView.image = SplitCarPlayBatteryIcon(device.batteryLevel);
+    }
+    _batteryLabel.hidden = !hasBattery;
+    _batteryIconView.hidden = !hasBattery;
+
     NSMutableArray<NSString *> *barParts = [NSMutableArray new];
     NSString *extras = [self extrasText];
     if (extras.length > 0) [barParts addObject:extras];
@@ -569,6 +715,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
         @"showSpeedBubble": @YES,
         @"bubbleStyle": @0,
         @"bubblePosition": @1, // 0 = left, 1 = right (matches the original top-right placement)
+        @"bubbleScale": @1.0, // pinch-to-resize; also a "Bubble Scale" slider in Settings
         @"speedAudioAlert": @YES,
         @"showDate": @YES,
         @"showBattery": @YES,
@@ -606,6 +753,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     self.speedBubble.showDate = [prefs[@"showDate"] boolValue];
     self.speedBubble.showBattery = [prefs[@"showBattery"] boolValue];
     self.speedBubble.showNowPlaying = [prefs[@"showNowPlaying"] boolValue];
+    self.speedBubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
     self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
     self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
 
@@ -615,16 +763,23 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     // choice from Settings, not something a one-off drag should silently
     // override. Vertical position (y) is left alone so dragging the
     // bubble up/down still sticks.
-    CGRect frame = self.speedBubble.frame;
+    //
+    // Uses bounds+center rather than .frame: the bubble now carries a
+    // pinch-driven scale transform (see SpeedBubbleView.scale above), and
+    // per Apple's docs, -frame (both reading AND writing it) is undefined
+    // once a view's transform isn't the identity transform.
+    CGPoint center = self.speedBubble.center;
+    CGRect bounds = self.speedBubble.bounds;
     switch (self.speedBubble.style) {
-        case SplitCarPlayBubbleStyleRing: frame.size = CGSizeMake(100, 100); break;
-        case SplitCarPlayBubbleStyleBar: frame.size = CGSizeMake(220, 44); break;
-        case SplitCarPlayBubbleStyleCard: default: frame.size = CGSizeMake(116, 188); break;
+        case SplitCarPlayBubbleStyleRing: bounds.size = CGSizeMake(100, 100); break;
+        case SplitCarPlayBubbleStyleBar: bounds.size = CGSizeMake(220, 44); break;
+        case SplitCarPlayBubbleStyleCard: default: bounds.size = CGSizeMake(116, 266); break;
     }
     BOOL bubbleOnLeft = [prefs[@"bubblePosition"] integerValue] == 0;
     CGFloat screenWidth = self.rootWindow.bounds.size.width;
-    frame.origin.x = bubbleOnLeft ? 16 : (screenWidth - frame.size.width - 16);
-    self.speedBubble.frame = frame;
+    CGFloat originX = bubbleOnLeft ? 16 : (screenWidth - bounds.size.width - 16);
+    self.speedBubble.bounds = bounds;
+    self.speedBubble.center = CGPointMake(originX + bounds.size.width / 2.0, center.y);
 
     if (!self.speedBubble.hidden) [self refreshSpeedBubble];
 }
@@ -653,9 +808,12 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [self.dividerView addGestureRecognizer:pan];
     self.dividerView.userInteractionEnabled = YES;
 
-    CGFloat cardWidth = 116, cardHeight = 150;
+    CGFloat cardWidth = 116, cardHeight = 266;
     self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - cardWidth - 16,
                                                                            16, cardWidth, cardHeight)];
+    self.speedBubble.onScaleChanged = ^(CGFloat scale) {
+        SplitCarPlayWritePref(@"bubbleScale", @(scale));
+    };
 
     [self.rootWindow addSubview:self.leftContainer];
     [self.rootWindow addSubview:self.rightContainer];
@@ -729,9 +887,13 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     [self.dividerView addGestureRecognizer:pan];
     self.dividerView.userInteractionEnabled = YES;
 
-    CGFloat cardWidth = 116, cardHeight = 150;
+    CGFloat cardWidth = 116, cardHeight = 266;
     self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - cardWidth - 16,
                                                                            56, cardWidth, cardHeight)];
+    self.speedBubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
+    self.speedBubble.onScaleChanged = ^(CGFloat scale) {
+        SplitCarPlayWritePref(@"bubbleScale", @(scale));
+    };
 
     self.closeOverlayButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [self.closeOverlayButton setTitle:@"✕ Đóng thử nghiệm" forState:UIControlStateNormal];

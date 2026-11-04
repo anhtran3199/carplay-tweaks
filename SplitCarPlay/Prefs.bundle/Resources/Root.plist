@@ -202,6 +202,25 @@
 
 		<dict>
 			<key>cell</key>
+			<string>PSSliderCell</string>
+			<key>label</key>
+			<string>Bubble Scale</string>
+			<key>key</key>
+			<string>bubbleScale</string>
+			<key>defaults</key>
+			<string>com.example.splitcarplay</string>
+			<key>default</key>
+			<real>1.0</real>
+			<key>min</key>
+			<real>0.6</real>
+			<key>max</key>
+			<real>1.6</real>
+			<key>PostNotification</key>
+			<string>com.example.splitcarplay/reload</string>
+		</dict>
+
+		<dict>
+			<key>cell</key>
 			<string>PSSwitchCell</string>
 			<key>label</key>
 			<string>Over-Limit Alert Sound</string>

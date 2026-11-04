@@ -164,12 +164,42 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
                                           (__bridge CFStringRef)kReloadNotification, NULL, NULL, YES);
 }
 
+// "T5, 5/11" -- matches the reference screenshot's date format; mirrors
+// Tweak.xm's SplitCarPlayWeekdayDateString (separate process, can't
+// share the compiled function, see this file's header comment).
+static NSString *SplitCarPlayWeekdayDateString(NSDate *date) {
+    NSDateComponents *comps = [[NSCalendar currentCalendar] components:(NSCalendarUnitWeekday | NSCalendarUnitDay | NSCalendarUnitMonth)
+                                                                fromDate:date];
+    NSArray<NSString *> *weekdayNames = @[@"CN", @"T2", @"T3", @"T4", @"T5", @"T6", @"T7"];
+    NSString *weekday = weekdayNames[(comps.weekday - 1) % 7];
+    return [NSString stringWithFormat:@"%@, %ld/%ld", weekday, (long)comps.day, (long)comps.month];
+}
+
+static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
+    NSString *name = level >= 0.95 ? @"battery.100"
+                    : level >= 0.70 ? @"battery.75"
+                    : level >= 0.45 ? @"battery.50"
+                    : level >= 0.20 ? @"battery.25"
+                    : @"battery.0";
+    if (@available(iOS 13.0, *)) {
+        return [UIImage systemImageNamed:name];
+    }
+    return nil;
+}
+
 #pragma mark - Minimal bubble preview (3 styles — mirrors Tweak.xm's SpeedBubbleView)
 
 @interface SplitCarPlayPreviewBubbleView : UIView
 @property (nonatomic, assign) SplitCarPlayBubbleStyle style;
 @property (nonatomic, assign) BOOL showDate;
 @property (nonatomic, assign) BOOL showBattery;
+// Pinch-to-resize, same CGAffineTransform-based approach as the real
+// SpeedBubbleView in Tweak.xm -- see that class's own comment for why a
+// transform (not a frame/bounds resize) is used. Clamped [0.6, 1.6].
+@property (nonatomic, assign) CGFloat scale;
+// Fires once per drag/pinch gesture (on end), not per-frame, so the
+// Preview controller can persist without spamming disk writes.
+@property (nonatomic, copy) void (^onUserAdjusted)(void);
 // isLive = real Vietmap Live data vs. made-up demo numbers (controls the
 // status icon/text and whether the ring/bar tint as "connected"); the
 // speed number itself always shows (demo or real) so the preview always
@@ -184,10 +214,17 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UIImageView *_statusIconView;
     UILabel *_statusLabel;
     UIView *_statusBar;
-    UILabel *_extrasLabel;
+    UILabel *_extrasLabel;        // date, its own line
+    UIImageView *_batteryIconView;
+    UILabel *_batteryLabel;       // battery %, its own line
+    UIView *_compassView;         // dashed-circle heading indicator, see Tweak.xm's SpeedBubbleView for why it's always "--"
+    CAShapeLayer *_compassDashLayer;
+    UILabel *_compassLabel;
     CAShapeLayer *_ringLayer;
     CAShapeLayer *_maskLayer;
-    NSDateFormatter *_timeFormatter;
+    UIPanGestureRecognizer *_pan;
+    UIPinchGestureRecognizer *_pinch;
+    CGFloat _currentScale;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -208,8 +245,6 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         self.layer.shadowRadius = 6;
         self.layer.shadowOffset = CGSizeMake(0, 2);
 
-        _timeFormatter = [NSDateFormatter new];
-        _timeFormatter.dateFormat = @"HH:mm";
 
         _speedBox = [[UIView alloc] init];
         _speedBox.backgroundColor = [UIColor whiteColor];
@@ -244,10 +279,39 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         [self addSubview:_statusLabel];
 
         _extrasLabel = [[UILabel alloc] init];
-        _extrasLabel.textAlignment = NSTextAlignmentCenter;
-        _extrasLabel.font = [UIFont systemFontOfSize:10];
-        _extrasLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+        _extrasLabel.textAlignment = NSTextAlignmentLeft;
+        _extrasLabel.font = [UIFont systemFontOfSize:11];
+        _extrasLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
         [self addSubview:_extrasLabel];
+
+        _batteryIconView = [[UIImageView alloc] init];
+        _batteryIconView.contentMode = UIViewContentModeScaleAspectFit;
+        _batteryIconView.tintColor = [UIColor colorWithWhite:0.4 alpha:1];
+        [self addSubview:_batteryIconView];
+
+        _batteryLabel = [[UILabel alloc] init];
+        _batteryLabel.textAlignment = NSTextAlignmentLeft;
+        _batteryLabel.font = [UIFont systemFontOfSize:11];
+        _batteryLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        [self addSubview:_batteryLabel];
+
+        _compassView = [[UIView alloc] init];
+        _compassView.backgroundColor = [UIColor clearColor];
+        [self addSubview:_compassView];
+
+        _compassDashLayer = [CAShapeLayer new];
+        _compassDashLayer.fillColor = [UIColor clearColor].CGColor;
+        _compassDashLayer.strokeColor = [UIColor colorWithWhite:0.6 alpha:1].CGColor;
+        _compassDashLayer.lineWidth = 1.5;
+        _compassDashLayer.lineDashPattern = @[@3, @3];
+        [_compassView.layer addSublayer:_compassDashLayer];
+
+        _compassLabel = [[UILabel alloc] init];
+        _compassLabel.text = @"--";
+        _compassLabel.textAlignment = NSTextAlignmentCenter;
+        _compassLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        _compassLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+        [_compassView addSubview:_compassLabel];
 
         _statusBar = [[UIView alloc] init];
         [self addSubview:_statusBar];
@@ -257,8 +321,42 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
         _ringLayer.lineWidth = 5;
         _ringLayer.hidden = YES;
         [self.layer addSublayer:_ringLayer];
+
+        _currentScale = 1.0;
+        _pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handlePan:)];
+        [self addGestureRecognizer:_pan];
+        _pinch = [[UIPinchGestureRecognizer alloc] initWithTarget:self action:@selector(handlePinch:)];
+        [self addGestureRecognizer:_pinch];
+        self.userInteractionEnabled = YES;
     }
     return self;
+}
+
+- (void)handlePan:(UIPanGestureRecognizer *)pan {
+    CGPoint translation = [pan translationInView:self.superview];
+    self.center = CGPointMake(self.center.x + translation.x, self.center.y + translation.y);
+    [pan setTranslation:CGPointZero inView:self.superview];
+    if (pan.state == UIGestureRecognizerStateEnded && self.onUserAdjusted) self.onUserAdjusted();
+}
+
+- (void)handlePinch:(UIPinchGestureRecognizer *)pinch {
+    if (pinch.state == UIGestureRecognizerStateChanged) {
+        CGFloat candidate = MAX(0.6, MIN(1.6, _currentScale * pinch.scale));
+        self.transform = CGAffineTransformMakeScale(candidate, candidate);
+    } else if (pinch.state == UIGestureRecognizerStateEnded || pinch.state == UIGestureRecognizerStateCancelled) {
+        _currentScale = MAX(0.6, MIN(1.6, _currentScale * pinch.scale));
+        self.transform = CGAffineTransformMakeScale(_currentScale, _currentScale);
+        if (self.onUserAdjusted) self.onUserAdjusted();
+    }
+}
+
+- (void)setScale:(CGFloat)scale {
+    _currentScale = MAX(0.6, MIN(1.6, scale));
+    self.transform = CGAffineTransformMakeScale(_currentScale, _currentScale);
+}
+
+- (CGFloat)scale {
+    return _currentScale;
 }
 
 - (void)setStyle:(SplitCarPlayBubbleStyle)style {
@@ -270,18 +368,6 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     self.layer.cornerRadius = radius;
     _maskLayer.frame = self.bounds;
     _maskLayer.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
-}
-
-- (NSString *)extrasText {
-    NSMutableArray<NSString *> *parts = [NSMutableArray new];
-    if (self.showDate) [parts addObject:[_timeFormatter stringFromDate:[NSDate date]]];
-    if (self.showBattery) {
-        UIDevice *device = [UIDevice currentDevice];
-        if (device.batteryState != UIDeviceBatteryStateUnknown) {
-            [parts addObject:[NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100]];
-        }
-    }
-    return [parts componentsJoinedByString:@" · "];
 }
 
 - (void)layoutSubviews {
@@ -307,17 +393,42 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     CGFloat w = self.bounds.size.width, pad = 8;
     CGFloat y = pad;
 
-    _extrasLabel.hidden = !(self.showDate || self.showBattery);
+    // Date and battery on their own lines -- matches the reference
+    // screenshot's stacked "T5, 5/11" / "77%" rather than one combined
+    // centered line.
+    _extrasLabel.hidden = !self.showDate;
     if (!_extrasLabel.hidden) {
-        _extrasLabel.text = [self extrasText];
-        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 12);
-        y = CGRectGetMaxY(_extrasLabel.frame) + 2;
+        _extrasLabel.text = SplitCarPlayWeekdayDateString([NSDate date]);
+        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 14);
+        y = CGRectGetMaxY(_extrasLabel.frame) + 1;
+    }
+    UIDevice *device = [UIDevice currentDevice];
+    BOOL showBatteryRow = self.showBattery && device.batteryState != UIDeviceBatteryStateUnknown;
+    _batteryIconView.hidden = !showBatteryRow;
+    _batteryLabel.hidden = !showBatteryRow;
+    if (showBatteryRow) {
+        _batteryLabel.text = [NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100];
+        _batteryIconView.image = SplitCarPlayBatteryIcon(device.batteryLevel);
+        CGFloat battIconSize = 12;
+        _batteryIconView.frame = CGRectMake(pad, y + 1, battIconSize, battIconSize);
+        _batteryLabel.frame = CGRectMake(CGRectGetMaxX(_batteryIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_batteryIconView.frame) - 4, 14);
+        y = CGRectGetMaxY(_batteryLabel.frame) + 4;
     }
 
     _speedBox.frame = CGRectMake(pad, y, w - pad * 2, 52);
     _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
     _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
-    y = CGRectGetMaxY(_speedBox.frame) + 6;
+    y = CGRectGetMaxY(_speedBox.frame) + 8;
+
+    // Dashed-circle heading indicator, matching the reference screenshot
+    // -- see the ivar comment on _compassView for why it's always "--".
+    CGFloat compassSize = MIN(60, w - pad * 2);
+    _compassView.hidden = NO;
+    _compassView.frame = CGRectMake((w - compassSize) / 2.0, y, compassSize, compassSize);
+    _compassLabel.frame = _compassView.bounds;
+    _compassDashLayer.frame = _compassView.bounds;
+    _compassDashLayer.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(_compassView.bounds, 1, 1)].CGPath;
+    y = CGRectGetMaxY(_compassView.frame) + 8;
 
     CGFloat iconSize = 14;
     _statusIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
@@ -336,6 +447,9 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _statusLabel.hidden = YES;
     _statusBar.hidden = YES;
     _extrasLabel.hidden = YES;
+    _batteryIconView.hidden = YES;
+    _batteryLabel.hidden = YES;
+    _compassView.hidden = YES;
 
     CGRect ringFrame = CGRectMake((self.bounds.size.width - side) / 2.0, (self.bounds.size.height - side) / 2.0, side, side);
     CGFloat inset = _ringLayer.lineWidth / 2.0 + 2;
@@ -360,6 +474,9 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _statusLabel.hidden = YES;
     _statusBar.hidden = NO;
     _extrasLabel.hidden = YES;
+    _batteryIconView.hidden = YES;
+    _batteryLabel.hidden = YES;
+    _compassView.hidden = YES;
 
     CGFloat h = self.bounds.size.height, pad = 10;
     CGFloat iconSize = MIN(16, h - 8);
@@ -422,6 +539,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     CGFloat _dragStartRatio;
     BOOL _leftHasSnapshot;
     BOOL _rightHasSnapshot;
+    BOOL _bubbleWasAdjusted; // once the bubble's been dragged, stop re-centering it every layout pass
 
     // "Tab mới" empty state (shown in a box until an app is picked for
     // it) + the grid-style "Chọn app ô 1/2" picker overlay -- both styled
@@ -533,6 +651,17 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
     _bubble = [[SplitCarPlayPreviewBubbleView alloc] initWithFrame:CGRectZero];
     [self.view addSubview:_bubble];
+    // Drag the bubble anywhere, pinch to resize it -- persists the scale
+    // to the shared "bubbleScale" pref (also a slider in Settings, and
+    // read by the real CarPlay bubble in Tweak.xm) and stops this
+    // screen's own layout from re-centering it on every pass once moved.
+    __weak typeof(self) weakSelf = self;
+    _bubble.onUserAdjusted = ^{
+        __strong typeof(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        strongSelf->_bubbleWasAdjusted = YES;
+        SplitCarPlaySetPref(@"bubbleScale", @(strongSelf->_bubble.scale));
+    };
 
     // Drag this to resize the split live -- same "splitRatio" pref the
     // "Split Ratio" slider on the main Settings screen controls, so
@@ -670,14 +799,22 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     mask.path = [UIBezierPath bezierPathWithRoundedRect:visibleRect cornerRadius:handleVisibleWidth / 2.0].CGPath;
     _dividerHandle.layer.mask = mask;
 
+    // Real SidePlay screenshots show this title bar only while a box is
+    // still empty/loading (picking an app, "Đang mở...") -- once real
+    // content is actually showing, it disappears and the content fills
+    // the box edge-to-edge with no notch at the top. Matches that: hide
+    // the bar (and let the snapshot take the full height) exactly when
+    // we have a real snapshot to show.
+    _leftTitleBar.hidden = _leftHasSnapshot;
+    _rightTitleBar.hidden = _rightHasSnapshot;
     _leftTitleBar.frame = CGRectMake(0, 0, _leftPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
     _rightTitleBar.frame = CGRectMake(0, 0, _rightPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
     [self layoutTitleBar:_leftTitleBar icon:_leftTitleIcon label:_leftLabel];
     [self layoutTitleBar:_rightTitleBar icon:_rightTitleIcon label:_rightLabel];
 
-    // A real snapshot fills the rest of the box below the title bar
-    // (it already looks like the app, same as a real screenshot);
-    // falling back to the plain icon centers it in that same area.
+    // A real snapshot fills the whole box now that the title bar above
+    // is hidden; falling back to the plain icon centers it in the area
+    // below the (still visible) title bar.
     [self layoutAppBox:_leftPlaceholder icon:_leftIconView hasSnapshot:_leftHasSnapshot];
     [self layoutAppBox:_rightPlaceholder icon:_rightIconView hasSnapshot:_rightHasSnapshot];
 
@@ -694,16 +831,22 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _leftIconView.hidden = _leftIsEmpty;
     _rightIconView.hidden = _rightIsEmpty;
 
-    CGFloat bubbleW = 116, bubbleH = 188;
+    CGFloat bubbleW = 116, bubbleH = 266;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
         case SplitCarPlayBubbleStyleRing: bubbleW = bubbleH = 100; break;
         case SplitCarPlayBubbleStyleBar: bubbleW = 220; bubbleH = 44; break;
         default: break;
     }
-    BOOL bubbleOnLeft = _positionControl.selectedSegmentIndex == 0;
-    CGFloat bubbleX = bubbleOnLeft ? CGRectGetMinX(_leftPlaceholder.frame) + 8
-                                    : CGRectGetMaxX(_rightPlaceholder.frame) - bubbleW - 8;
-    _bubble.frame = CGRectMake(bubbleX, topInset + 8, bubbleW, bubbleH);
+    // Uses bounds+center, not .frame: the bubble carries a pinch-driven
+    // scale transform now, and -frame is undefined (per Apple's docs)
+    // once a view's transform isn't the identity transform.
+    _bubble.bounds = CGRectMake(0, 0, bubbleW, bubbleH);
+    if (!_bubbleWasAdjusted) {
+        BOOL bubbleOnLeft = _positionControl.selectedSegmentIndex == 0;
+        CGFloat bubbleX = bubbleOnLeft ? CGRectGetMinX(_leftPlaceholder.frame) + 8
+                                        : CGRectGetMaxX(_rightPlaceholder.frame) - bubbleW - 8;
+        _bubble.center = CGPointMake(bubbleX + bubbleW / 2.0, topInset + 8 + bubbleH / 2.0);
+    }
 
     _styleControl.frame = CGRectMake(16, CGRectGetMaxY(_leftPlaceholder.frame) + 20, bounds.size.width - 32, 32);
     _positionControl.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 32);
@@ -722,9 +865,13 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 }
 
 - (void)layoutAppBox:(UIView *)placeholder icon:(UIImageView *)icon hasSnapshot:(BOOL)hasSnapshot {
-    CGRect contentArea = CGRectMake(0, kSplitCarPlayTitleBarHeight,
+    // The title bar is hidden whenever hasSnapshot is YES (see
+    // viewDidLayoutSubviews), so the content area only needs to leave
+    // room for it while showing the icon fallback.
+    CGFloat topOffset = hasSnapshot ? 0 : kSplitCarPlayTitleBarHeight;
+    CGRect contentArea = CGRectMake(0, topOffset,
                                      placeholder.bounds.size.width,
-                                     placeholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
+                                     placeholder.bounds.size.height - topOffset);
     icon.layer.cornerRadius = hasSnapshot ? 0 : 12;
     if (hasSnapshot) {
         icon.frame = contentArea; // fill the box edge-to-edge, like a real screenshot
@@ -942,11 +1089,13 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 - (void)styleChanged:(UISegmentedControl *)sender {
     SplitCarPlaySetPref(@"bubbleStyle", @(sender.selectedSegmentIndex));
     _bubble.style = (SplitCarPlayBubbleStyle)sender.selectedSegmentIndex;
+    _bubbleWasAdjusted = NO; // an explicit style pick re-homes the bubble to the Left/Right default spot
     [self.view setNeedsLayout];
 }
 
 - (void)positionChanged:(UISegmentedControl *)sender {
     SplitCarPlaySetPref(@"bubblePosition", @(sender.selectedSegmentIndex));
+    _bubbleWasAdjusted = NO; // ditto -- Left/Right is an explicit placement choice, not overridden by a stale drag
     [self.view setNeedsLayout];
 }
 
@@ -988,6 +1137,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _bubble.style = (SplitCarPlayBubbleStyle)[prefs[@"bubbleStyle"] integerValue];
     _bubble.showDate = prefs[@"showDate"] ? [prefs[@"showDate"] boolValue] : YES;
     _bubble.showBattery = prefs[@"showBattery"] ? [prefs[@"showBattery"] boolValue] : YES;
+    _bubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
     _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
     _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
 
