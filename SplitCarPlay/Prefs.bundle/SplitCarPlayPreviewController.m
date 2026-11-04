@@ -395,6 +395,8 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 
 #pragma mark - Preview screen
 
+static const CGFloat kSplitCarPlayTitleBarHeight = 26;
+
 @interface SplitCarPlayPreviewController : UIViewController
 @end
 
@@ -405,6 +407,10 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UIImageView *_rightIconView;
     UILabel *_leftLabel;
     UILabel *_rightLabel;
+    UIView *_leftTitleBar;
+    UIView *_rightTitleBar;
+    UIImageView *_leftTitleIcon;
+    UIImageView *_rightTitleIcon;
     SplitCarPlayPreviewBubbleView *_bubble;
     UISegmentedControl *_styleControl;
     UISegmentedControl *_positionControl;
@@ -431,10 +437,26 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     [_leftPlaceholder addSubview:_leftIconView];
     [_rightPlaceholder addSubview:_rightIconView];
 
-    _leftLabel = [self makePlaceholderLabel];
-    _rightLabel = [self makePlaceholderLabel];
-    [_leftPlaceholder addSubview:_leftLabel];
-    [_rightPlaceholder addSubview:_rightLabel];
+    // A fake "browser/app window" title bar (3 traffic-light dots + a
+    // small icon + the app name) on top of each box -- purely cosmetic,
+    // same idea SidePlay's own "Mô phỏng" screen uses on its two app
+    // mockups (confirmed from a screenshot: the YouTube side shows grey
+    // skeleton placeholders under that bar, not real video, so it's
+    // decoration there too, not a real window with working buttons).
+    _leftTitleBar = [self makeTitleBarWithDots];
+    _rightTitleBar = [self makeTitleBarWithDots];
+    [_leftPlaceholder addSubview:_leftTitleBar];
+    [_rightPlaceholder addSubview:_rightTitleBar];
+
+    _leftTitleIcon = [self makeTitleIconView];
+    _rightTitleIcon = [self makeTitleIconView];
+    [_leftTitleBar addSubview:_leftTitleIcon];
+    [_rightTitleBar addSubview:_rightTitleIcon];
+
+    _leftLabel = [self makeTitleBarLabel];
+    _rightLabel = [self makeTitleBarLabel];
+    [_leftTitleBar addSubview:_leftLabel];
+    [_rightTitleBar addSubview:_rightLabel];
 
     _styleControl = [[UISegmentedControl alloc] initWithItems:@[@"Card", @"Ring", @"Bar"]];
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
@@ -498,6 +520,7 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UIView *view = [[UIView alloc] init];
     view.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1];
     view.layer.cornerRadius = 8;
+    view.layer.masksToBounds = YES; // keep the title bar's top corners and the snapshot's edges inside the rounded card
     return view;
 }
 
@@ -509,12 +532,40 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     return iconView;
 }
 
-- (UILabel *)makePlaceholderLabel {
+- (UIView *)makeTitleBarWithDots {
+    UIView *bar = [[UIView alloc] init];
+    bar.backgroundColor = [UIColor colorWithWhite:0.24 alpha:1];
+    NSArray<UIColor *> *dotColors = @[
+        [UIColor colorWithRed:1.0 green:0.37 blue:0.34 alpha:1],  // red
+        [UIColor colorWithRed:1.0 green:0.74 blue:0.18 alpha:1],  // yellow
+        [UIColor colorWithRed:0.2 green:0.78 blue:0.35 alpha:1],  // green
+    ];
+    CGFloat dotSize = 8, dotGap = 6, x = 8;
+    for (UIColor *color in dotColors) {
+        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(x, (kSplitCarPlayTitleBarHeight - dotSize) / 2.0, dotSize, dotSize)];
+        dot.backgroundColor = color;
+        dot.layer.cornerRadius = dotSize / 2.0;
+        [bar addSubview:dot];
+        x += dotSize + dotGap;
+    }
+    return bar;
+}
+
+- (UIImageView *)makeTitleIconView {
+    UIImageView *iconView = [[UIImageView alloc] init];
+    iconView.contentMode = UIViewContentModeScaleAspectFit;
+    iconView.layer.cornerRadius = 3;
+    iconView.layer.masksToBounds = YES;
+    return iconView;
+}
+
+- (UILabel *)makeTitleBarLabel {
     UILabel *label = [[UILabel alloc] init];
-    label.textColor = [UIColor colorWithWhite:0.6 alpha:1];
-    label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-    label.textAlignment = NSTextAlignmentCenter;
-    label.numberOfLines = 2;
+    label.textColor = [UIColor colorWithWhite:0.88 alpha:1];
+    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+    label.textAlignment = NSTextAlignmentLeft;
+    label.numberOfLines = 1;
+    label.lineBreakMode = NSLineBreakByTruncatingTail;
     return label;
 }
 
@@ -548,12 +599,16 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     mask.path = [UIBezierPath bezierPathWithRoundedRect:visibleRect cornerRadius:handleVisibleWidth / 2.0].CGPath;
     _dividerHandle.layer.mask = mask;
 
-    // A real snapshot fills nearly the whole box (it already looks like
-    // the app, same as a real screenshot) with just a small caption
-    // strip at the bottom; falling back to the plain icon keeps the
-    // original small-centered-icon-plus-label layout.
-    [self layoutAppBox:_leftPlaceholder icon:_leftIconView label:_leftLabel hasSnapshot:_leftHasSnapshot];
-    [self layoutAppBox:_rightPlaceholder icon:_rightIconView label:_rightLabel hasSnapshot:_rightHasSnapshot];
+    _leftTitleBar.frame = CGRectMake(0, 0, _leftPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
+    _rightTitleBar.frame = CGRectMake(0, 0, _rightPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
+    [self layoutTitleBar:_leftTitleBar icon:_leftTitleIcon label:_leftLabel];
+    [self layoutTitleBar:_rightTitleBar icon:_rightTitleIcon label:_rightLabel];
+
+    // A real snapshot fills the rest of the box below the title bar
+    // (it already looks like the app, same as a real screenshot);
+    // falling back to the plain icon centers it in that same area.
+    [self layoutAppBox:_leftPlaceholder icon:_leftIconView hasSnapshot:_leftHasSnapshot];
+    [self layoutAppBox:_rightPlaceholder icon:_rightIconView hasSnapshot:_rightHasSnapshot];
 
     CGFloat bubbleW = 116, bubbleH = 188;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
@@ -571,24 +626,28 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 60);
 }
 
-- (void)layoutAppBox:(UIView *)placeholder icon:(UIImageView *)icon label:(UILabel *)label hasSnapshot:(BOOL)hasSnapshot {
+- (void)layoutTitleBar:(UIView *)bar icon:(UIImageView *)icon label:(UILabel *)label {
+    CGFloat dotsEndX = 8 + 3 * 8 + 2 * 6; // matches makeTitleBarWithDots's dotSize/dotGap/start-x
+    CGFloat iconSize = 14;
+    CGFloat iconX = dotsEndX + 10;
+    icon.frame = CGRectMake(iconX, (kSplitCarPlayTitleBarHeight - iconSize) / 2.0, iconSize, iconSize);
+    CGFloat labelX = CGRectGetMaxX(icon.frame) + 6;
+    CGFloat labelWidth = MAX(0, bar.bounds.size.width - labelX - 10);
+    label.frame = CGRectMake(labelX, 0, labelWidth, kSplitCarPlayTitleBarHeight);
+}
+
+- (void)layoutAppBox:(UIView *)placeholder icon:(UIImageView *)icon hasSnapshot:(BOOL)hasSnapshot {
+    CGRect contentArea = CGRectMake(0, kSplitCarPlayTitleBarHeight,
+                                     placeholder.bounds.size.width,
+                                     placeholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
     icon.layer.cornerRadius = hasSnapshot ? 0 : 12;
     if (hasSnapshot) {
-        icon.frame = placeholder.bounds; // fill the box edge-to-edge, like a real screenshot
-        label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-        label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-        label.layer.cornerRadius = 6;
-        label.layer.masksToBounds = YES;
-        CGFloat labelHeight = 18;
-        label.frame = CGRectMake(6, placeholder.bounds.size.height - labelHeight - 6,
-                                  placeholder.bounds.size.width - 12, labelHeight);
+        icon.frame = contentArea; // fill the box edge-to-edge, like a real screenshot
     } else {
-        CGFloat iconSize = MIN(56, placeholder.bounds.size.width - 24);
-        icon.frame = CGRectMake((placeholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
-        label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
-        label.backgroundColor = [UIColor clearColor];
-        label.layer.cornerRadius = 0;
-        label.frame = CGRectMake(4, CGRectGetMaxY(icon.frame) + 8, placeholder.bounds.size.width - 8, 32);
+        CGFloat iconSize = MIN(56, contentArea.size.width - 24);
+        icon.frame = CGRectMake(CGRectGetMinX(contentArea) + (contentArea.size.width - iconSize) / 2.0,
+                                 CGRectGetMinY(contentArea) + (contentArea.size.height - iconSize) / 2.0,
+                                 iconSize, iconSize);
     }
 }
 
@@ -609,6 +668,8 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     NSString *rightID = prefs[@"rightBundleID"];
     _leftLabel.text = SplitCarPlayDisplayNameForBundleID(leftID) ?: @"(chưa chọn)";
     _rightLabel.text = SplitCarPlayDisplayNameForBundleID(rightID) ?: @"(chưa chọn)";
+    _leftTitleIcon.image = SplitCarPlayAppIcon(leftID);
+    _rightTitleIcon.image = SplitCarPlayAppIcon(rightID);
 
     // Prefer a real cached app-switcher snapshot (looks like the actual
     // app) over the plain icon -- see this file's header comment. Either
