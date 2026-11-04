@@ -46,6 +46,7 @@
 //  never a blank box.
 //
 #import <UIKit/UIKit.h>
+#import <QuartzCore/QuartzCore.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <CoreImage/CoreImage.h>
@@ -110,6 +111,11 @@ static UIImage *SplitCarPlayLoadKTXImage(NSString *path) {
     if (!texture) return nil;
     CIImage *ciImage = [CIImage imageWithMTLTexture:texture options:nil];
     if (!ciImage) return nil;
+    // Metal textures have their origin at the top-left; Core Image's
+    // coordinate space has its origin at the bottom-left (same as
+    // OpenGL). Without this flip, every KTX snapshot renders upside down.
+    CGAffineTransform flip = CGAffineTransformMake(1, 0, 0, -1, 0, ciImage.extent.size.height);
+    ciImage = [ciImage imageByApplyingTransform:flip];
     CIContext *context = [CIContext context];
     CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
     if (!cgImage) return nil;
@@ -403,7 +409,9 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UISegmentedControl *_styleControl;
     UISegmentedControl *_positionControl;
     UILabel *_captionLabel;
+    UIView *_dividerHandle;
     CGFloat _splitRatio;
+    CGFloat _dragStartRatio;
     BOOL _leftHasSnapshot;
     BOOL _rightHasSnapshot;
 }
@@ -444,13 +452,41 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = @"Xem trước giao diện — không cần cắm CarPlay thật. Đổi kiểu/vị trí bên dưới để xem ngay; thay đổi cũng áp dụng cho màn hình CarPlay thật nếu đang cắm.";
+    _captionLabel.text = @"Xem trước giao diện — không cần cắm CarPlay thật. Kéo thanh ở giữa để đổi tỉ lệ chia màn hình, đổi kiểu/vị trí bên dưới để xem ngay. Đây chỉ là ảnh xem trước (không bấm vào app được) — 2 app chỉ thật sự chạy và thao tác được khi cắm CarPlay thật.";
     [self.view addSubview:_captionLabel];
 
     _bubble = [[SplitCarPlayPreviewBubbleView alloc] initWithFrame:CGRectZero];
     [self.view addSubview:_bubble];
 
+    // Drag this to resize the split live -- same "splitRatio" pref the
+    // "Split Ratio" slider on the main Settings screen controls, so
+    // either one moves the other.
+    _dividerHandle = [[UIView alloc] init];
+    _dividerHandle.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
+    _dividerHandle.layer.cornerRadius = 3;
+    [self.view addSubview:_dividerHandle];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDividerPan:)];
+    [_dividerHandle addGestureRecognizer:pan];
+    _dividerHandle.userInteractionEnabled = YES;
+
     [self refresh];
+}
+
+- (void)handleDividerPan:(UIPanGestureRecognizer *)gesture {
+    CGFloat dividerWidth = 4;
+    CGFloat usableWidth = self.view.bounds.size.width - 32 - dividerWidth;
+    if (gesture.state == UIGestureRecognizerStateBegan) {
+        _dragStartRatio = _splitRatio > 0 ? _splitRatio : 0.5;
+    }
+    CGFloat deltaRatio = [gesture translationInView:self.view].x / usableWidth;
+    _splitRatio = MAX(0.2, MIN(0.8, _dragStartRatio + deltaRatio));
+    [self.view setNeedsLayout];
+    [self.view layoutIfNeeded];
+    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+        // Persist only once the drag finishes -- matches the slider's
+        // own behavior and avoids writing the plist on every pixel.
+        SplitCarPlaySetPref(@"splitRatio", @(_splitRatio));
+    }
 }
 
 - (void)viewWillAppear:(BOOL)animated {
@@ -495,6 +531,22 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     CGFloat rightWidth = usableWidth - leftWidth;
     _leftPlaceholder.frame = CGRectMake(16, topInset, leftWidth, carScreenHeight);
     _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, rightWidth, carScreenHeight);
+
+    // A wider invisible hit area than the thin visible line, centered on
+    // the boundary between the two placeholders, so it's actually easy
+    // to grab with a finger.
+    CGFloat handleHitWidth = 28, handleVisibleWidth = 5, handleHeight = 64;
+    CGFloat boundaryX = CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth / 2.0;
+    _dividerHandle.frame = CGRectMake(boundaryX - handleHitWidth / 2.0,
+                                       topInset + (carScreenHeight - handleHeight) / 2.0,
+                                       handleHitWidth, handleHeight);
+    _dividerHandle.layer.cornerRadius = handleVisibleWidth / 2.0;
+    // Only the thin center strip is drawn; the rest of the frame is
+    // just a bigger invisible tap/drag target.
+    CGRect visibleRect = CGRectMake((handleHitWidth - handleVisibleWidth) / 2.0, 0, handleVisibleWidth, handleHeight);
+    CAShapeLayer *mask = [CAShapeLayer layer];
+    mask.path = [UIBezierPath bezierPathWithRoundedRect:visibleRect cornerRadius:handleVisibleWidth / 2.0].CGPath;
+    _dividerHandle.layer.mask = mask;
 
     // A real snapshot fills nearly the whole box (it already looks like
     // the app, same as a real screenshot) with just a small caption
