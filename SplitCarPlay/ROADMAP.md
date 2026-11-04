@@ -132,6 +132,24 @@ in, so this list builds on work already validated as the right direction.
       mode is contained to Preferences.app (worst case: force-quit
       Settings and reopen).
 
+- [x] **Preview UI restyled after SidePlay's own "Mô phỏng" screenshots**
+      — two concrete things the user pointed at directly:
+        - **Grid-style "Chọn app ô 1/2" picker** — tapping either box in
+          the Preview now opens an in-place card (not a pushed nav
+          screen) with a "GẦN ĐÂY" row and a "TẤT CẢ" icon grid, matching
+          the reference screenshots' layout. Reuses the exact same
+          enumerate/filter/sort logic as the original table picker (now
+          exported from `SplitCarPlayAppPickerController.m` as
+          `SplitCarPlayUserInstalledBundleIDsSorted()`) rather than a
+          second copy of it. "Gần đây" is a simplification: just the two
+          currently-picked apps, not a persisted history.
+        - **"Tab mới" empty state** — a box with nothing picked yet now
+          looks like an empty browser tab ("+ Tab mới" in the title bar,
+          a small "Gần đây" row of icons, a "Tất cả app >" link) instead
+          of a blank placeholder with "(chưa chọn)" text.
+      Both are purely cosmetic/UI, same category as the title-bar dots
+      above — no new private API involved.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

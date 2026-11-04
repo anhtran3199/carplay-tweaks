@@ -126,6 +126,29 @@ UIImage *SplitCarPlayAppIcon(NSString *bundleID) {
     return result;
 }
 
+// Exported (not static) so SplitCarPlayPreviewController.m's grid-style
+// "Chọn app ô 1/2" picker can reuse the exact same enumerate/filter/sort
+// logic as the table-based picker below, instead of a second copy of it.
+NSArray<NSString *> *SplitCarPlayUserInstalledBundleIDsSorted(void) {
+    LSApplicationWorkspace *workspace = SplitCarPlayWorkspace();
+    NSArray<LSApplicationProxy *> *all = @[];
+    if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+        all = [workspace allInstalledApplications] ?: @[];
+    }
+    NSMutableArray<LSApplicationProxy *> *validApps = [NSMutableArray new];
+    for (LSApplicationProxy *app in all) {
+        if (SplitCarPlayAppBundleID(app).length > 0 && SplitCarPlayAppLooksUserInstalled(app)) {
+            [validApps addObject:app];
+        }
+    }
+    [validApps sortUsingComparator:^NSComparisonResult(LSApplicationProxy *a, LSApplicationProxy *b) {
+        return [SplitCarPlayAppDisplayName(a) caseInsensitiveCompare:SplitCarPlayAppDisplayName(b)];
+    }];
+    NSMutableArray<NSString *> *ids = [NSMutableArray new];
+    for (LSApplicationProxy *app in validApps) [ids addObject:SplitCarPlayAppBundleID(app)];
+    return ids;
+}
+
 #pragma mark - Shared prefs I/O (same contract SplitCarPlay.dylib reads/writes)
 
 static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";

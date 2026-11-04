@@ -53,6 +53,7 @@
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // SplitCarPlayAppPickerController.m
 extern UIImage *SplitCarPlayAppIcon(NSString *bundleID); // SplitCarPlayAppPickerController.m
+extern NSArray<NSString *> *SplitCarPlayUserInstalledBundleIDsSorted(void); // SplitCarPlayAppPickerController.m
 
 #pragma mark - App-switcher snapshot lookup (see header comment)
 
@@ -397,7 +398,7 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
 
 static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
-@interface SplitCarPlayPreviewController : UIViewController
+@interface SplitCarPlayPreviewController : UIViewController <UIGestureRecognizerDelegate>
 @end
 
 @implementation SplitCarPlayPreviewController {
@@ -421,6 +422,19 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     CGFloat _dragStartRatio;
     BOOL _leftHasSnapshot;
     BOOL _rightHasSnapshot;
+
+    // "Tab mới" empty state (shown in a box until an app is picked for
+    // it) + the grid-style "Chọn app ô 1/2" picker overlay -- both styled
+    // after SidePlay's own "Mô phỏng" screen.
+    UIView *_leftEmptyState;
+    UIView *_rightEmptyState;
+    BOOL _leftIsEmpty;
+    BOOL _rightIsEmpty;
+    UIView *_pickerDim;
+    UIView *_pickerCard;
+    UILabel *_pickerTitle;
+    UIScrollView *_pickerScroll;
+    BOOL _pickerIsLeftSide;
 }
 
 - (void)viewDidLoad {
@@ -458,6 +472,29 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _rightLabel = [self makeTitleBarLabel];
     [_leftTitleBar addSubview:_leftLabel];
     [_rightTitleBar addSubview:_rightLabel];
+
+    // "Tab mới" empty state (SidePlay's own look for a box with nothing
+    // picked yet) -- populated dynamically in viewDidLayoutSubviews since
+    // its own layout needs the placeholder's final width.
+    _leftEmptyState = [[UIView alloc] init];
+    _rightEmptyState = [[UIView alloc] init];
+    [_leftPlaceholder addSubview:_leftEmptyState];
+    [_rightPlaceholder addSubview:_rightEmptyState];
+
+    // Tap a box to open the grid-style "Chọn app ô 1/2" picker (same
+    // whether it's empty or already showing an app -- lets you change
+    // the pick, not just make the first one). The gesture's delegate
+    // skips touches that land on a button inside the empty state (the
+    // recent-app icons / "Tất cả app" link) so they get their own tap
+    // instead of this one swallowing it.
+    UITapGestureRecognizer *leftTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(leftPlaceholderTapped)];
+    leftTap.delegate = self;
+    [_leftPlaceholder addGestureRecognizer:leftTap];
+    _leftPlaceholder.userInteractionEnabled = YES;
+    UITapGestureRecognizer *rightTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(rightPlaceholderTapped)];
+    rightTap.delegate = self;
+    [_rightPlaceholder addGestureRecognizer:rightTap];
+    _rightPlaceholder.userInteractionEnabled = YES;
 
     _styleControl = [[UISegmentedControl alloc] initWithItems:@[@"Card", @"Ring", @"Bar"]];
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
@@ -644,6 +681,19 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     [self layoutAppBox:_leftPlaceholder icon:_leftIconView hasSnapshot:_leftHasSnapshot];
     [self layoutAppBox:_rightPlaceholder icon:_rightIconView hasSnapshot:_rightHasSnapshot];
 
+    _leftEmptyState.frame = CGRectMake(0, kSplitCarPlayTitleBarHeight,
+                                        _leftPlaceholder.bounds.size.width,
+                                        _leftPlaceholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
+    _rightEmptyState.frame = CGRectMake(0, kSplitCarPlayTitleBarHeight,
+                                         _rightPlaceholder.bounds.size.width,
+                                         _rightPlaceholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
+    [self populateEmptyState:_leftEmptyState isLeft:YES];
+    [self populateEmptyState:_rightEmptyState isLeft:NO];
+    _leftEmptyState.hidden = !_leftIsEmpty;
+    _rightEmptyState.hidden = !_rightIsEmpty;
+    _leftIconView.hidden = _leftIsEmpty;
+    _rightIconView.hidden = _rightIsEmpty;
+
     CGFloat bubbleW = 116, bubbleH = 188;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
         case SplitCarPlayBubbleStyleRing: bubbleW = bubbleH = 100; break;
@@ -686,6 +736,209 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     }
 }
 
+- (BOOL)gestureRecognizer:(UITapGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    // Let a tap that lands on one of the empty state's own buttons (a
+    // recent-app icon, "Tất cả app") handle itself instead of this
+    // whole-box tap swallowing it first.
+    return ![touch.view isKindOfClass:[UIControl class]];
+}
+
+- (void)leftPlaceholderTapped { [self showAppPickerForLeftSide:YES]; }
+- (void)rightPlaceholderTapped { [self showAppPickerForLeftSide:NO]; }
+
+#pragma mark - "Tab mới" empty state
+
+- (void)populateEmptyState:(UIView *)emptyState isLeft:(BOOL)isLeft {
+    for (UIView *subview in emptyState.subviews) [subview removeFromSuperview];
+    if (emptyState.bounds.size.width <= 0) return;
+
+    UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, emptyState.bounds.size.width - 20, 14)];
+    header.text = @"Gần đây";
+    header.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
+    header.textColor = [UIColor colorWithWhite:0.5 alpha:1];
+    [emptyState addSubview:header];
+
+    CGFloat itemW = 52, x = 10, y = 26;
+    for (NSString *bundleID in [self recentBundleIDs]) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(x, y, itemW, 56);
+        button.accessibilityIdentifier = bundleID;
+        button.tag = isLeft ? 1 : 2;
+        [button addTarget:self action:@selector(emptyStateRecentTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+        UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake((itemW - 36) / 2.0, 0, 36, 36)];
+        icon.image = SplitCarPlayAppIcon(bundleID);
+        icon.layer.cornerRadius = 8;
+        icon.layer.masksToBounds = YES;
+        icon.userInteractionEnabled = NO;
+        [button addSubview:icon];
+
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, 38, itemW, 14)];
+        label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
+        label.font = [UIFont systemFontOfSize:9];
+        label.textColor = [UIColor whiteColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.userInteractionEnabled = NO;
+        [button addSubview:label];
+
+        [emptyState addSubview:button];
+        x += itemW + 8;
+        if (x + itemW > emptyState.bounds.size.width) break; // only as many as fit on one row
+    }
+
+    UIButton *allAppsButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [allAppsButton setTitle:@"Tất cả app >" forState:UIControlStateNormal];
+    allAppsButton.titleLabel.font = [UIFont systemFontOfSize:11];
+    allAppsButton.tintColor = [UIColor colorWithRed:0.35 green:0.62 blue:1 alpha:1];
+    allAppsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
+    allAppsButton.frame = CGRectMake(10, y + 64, emptyState.bounds.size.width - 20, 18);
+    allAppsButton.tag = isLeft ? 1 : 2;
+    [allAppsButton addTarget:self action:@selector(emptyStateAllAppsTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [emptyState addSubview:allAppsButton];
+}
+
+// Simplification: "recent" here is just whichever two apps are currently
+// picked for the two boxes (deduplicated), not a persisted history --
+// matches the two apps actually relevant to this tool without adding a
+// separate recents list to track and prune.
+- (NSArray<NSString *> *)recentBundleIDs {
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    NSMutableArray<NSString *> *recent = [NSMutableArray new];
+    for (NSString *bundleID in @[ prefs[@"leftBundleID"] ?: @"", prefs[@"rightBundleID"] ?: @"" ]) {
+        if (bundleID.length > 0 && ![recent containsObject:bundleID]) [recent addObject:bundleID];
+    }
+    return recent;
+}
+
+- (void)emptyStateRecentTapped:(UIButton *)sender {
+    NSString *bundleID = sender.accessibilityIdentifier;
+    if (bundleID.length == 0) return;
+    SplitCarPlaySetPref(sender.tag == 1 ? @"leftBundleID" : @"rightBundleID", bundleID);
+    [self refresh];
+}
+
+- (void)emptyStateAllAppsTapped:(UIButton *)sender {
+    [self showAppPickerForLeftSide:(sender.tag == 1)];
+}
+
+#pragma mark - Grid-style "Chọn app ô 1/2" picker overlay
+
+- (void)showAppPickerForLeftSide:(BOOL)isLeft {
+    _pickerIsLeftSide = isLeft;
+
+    _pickerDim = [[UIView alloc] initWithFrame:self.view.bounds];
+    _pickerDim.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    _pickerDim.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    UITapGestureRecognizer *dimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(dismissAppPicker)];
+    [_pickerDim addGestureRecognizer:dimTap];
+    [self.view addSubview:_pickerDim];
+
+    CGRect cardFrame = CGRectMake(16, self.view.safeAreaInsets.top + 60,
+                                   self.view.bounds.size.width - 32,
+                                   self.view.bounds.size.height * 0.6);
+    _pickerCard = [[UIView alloc] initWithFrame:cardFrame];
+    _pickerCard.backgroundColor = [UIColor colorWithWhite:0.14 alpha:1];
+    _pickerCard.layer.cornerRadius = 14;
+    _pickerCard.layer.masksToBounds = YES;
+    [self.view addSubview:_pickerCard];
+
+    _pickerTitle = [[UILabel alloc] initWithFrame:CGRectMake(16, 14, cardFrame.size.width - 60, 24)];
+    _pickerTitle.text = isLeft ? @"Chọn app ô 1" : @"Chọn app ô 2";
+    _pickerTitle.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _pickerTitle.textColor = [UIColor whiteColor];
+    [_pickerCard addSubview:_pickerTitle];
+
+    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [closeButton setTitle:@"✕" forState:UIControlStateNormal];
+    closeButton.tintColor = [UIColor colorWithWhite:0.7 alpha:1];
+    closeButton.frame = CGRectMake(cardFrame.size.width - 44, 6, 36, 36);
+    [closeButton addTarget:self action:@selector(dismissAppPicker) forControlEvents:UIControlEventTouchUpInside];
+    [_pickerCard addSubview:closeButton];
+
+    _pickerScroll = [[UIScrollView alloc] initWithFrame:CGRectMake(0, 48, cardFrame.size.width, cardFrame.size.height - 48)];
+    [_pickerCard addSubview:_pickerScroll];
+
+    [self populatePickerGrid];
+}
+
+- (void)populatePickerGrid {
+    for (UIView *subview in _pickerScroll.subviews) [subview removeFromSuperview];
+
+    CGFloat y = 8;
+    NSArray<NSString *> *recent = [self recentBundleIDs];
+    if (recent.count > 0) {
+        y = [self addPickerSection:@"GẦN ĐÂY" bundleIDs:recent startY:y];
+    }
+    y = [self addPickerSection:@"TẤT CẢ" bundleIDs:SplitCarPlayUserInstalledBundleIDsSorted() startY:y];
+
+    _pickerScroll.contentSize = CGSizeMake(_pickerScroll.bounds.size.width, y + 12);
+}
+
+- (CGFloat)addPickerSection:(NSString *)title bundleIDs:(NSArray<NSString *> *)bundleIDs startY:(CGFloat)y {
+    UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(12, y, _pickerScroll.bounds.size.width - 24, 18)];
+    header.text = title;
+    header.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+    header.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    [_pickerScroll addSubview:header];
+    y += 26;
+
+    CGFloat itemWidth = 72, itemIconSize = 60, padding = 4;
+    NSInteger columns = MAX(1, (NSInteger)(_pickerScroll.bounds.size.width / itemWidth));
+    CGFloat sideInset = (_pickerScroll.bounds.size.width - columns * itemWidth) / 2.0;
+
+    NSInteger col = 0;
+    CGFloat rowY = y;
+    for (NSString *bundleID in bundleIDs) {
+        CGFloat x = sideInset + col * itemWidth;
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(x, rowY, itemWidth, itemIconSize + 26);
+        button.accessibilityIdentifier = bundleID;
+        [button addTarget:self action:@selector(pickerAppTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+        UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake((itemWidth - itemIconSize) / 2.0, 0, itemIconSize, itemIconSize)];
+        icon.image = SplitCarPlayAppIcon(bundleID);
+        icon.contentMode = UIViewContentModeScaleAspectFit;
+        icon.layer.cornerRadius = 12;
+        icon.layer.masksToBounds = YES;
+        icon.userInteractionEnabled = NO;
+        [button addSubview:icon];
+
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, itemIconSize + 2, itemWidth, 16)];
+        label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
+        label.font = [UIFont systemFontOfSize:11];
+        label.textColor = [UIColor whiteColor];
+        label.textAlignment = NSTextAlignmentCenter;
+        label.lineBreakMode = NSLineBreakByTruncatingTail;
+        label.userInteractionEnabled = NO;
+        [button addSubview:label];
+
+        [_pickerScroll addSubview:button];
+
+        col++;
+        if (col >= columns) {
+            col = 0;
+            rowY += itemIconSize + 26 + padding;
+        }
+    }
+    if (col != 0) rowY += itemIconSize + 26 + padding;
+    return rowY + 14;
+}
+
+- (void)pickerAppTapped:(UIButton *)sender {
+    NSString *bundleID = sender.accessibilityIdentifier;
+    if (bundleID.length == 0) return;
+    SplitCarPlaySetPref(_pickerIsLeftSide ? @"leftBundleID" : @"rightBundleID", bundleID);
+    [self dismissAppPicker];
+    [self refresh];
+}
+
+- (void)dismissAppPicker {
+    [_pickerDim removeFromSuperview];
+    [_pickerCard removeFromSuperview];
+    _pickerDim = nil;
+    _pickerCard = nil;
+}
+
 - (void)styleChanged:(UISegmentedControl *)sender {
     SplitCarPlaySetPref(@"bubbleStyle", @(sender.selectedSegmentIndex));
     _bubble.style = (SplitCarPlayBubbleStyle)sender.selectedSegmentIndex;
@@ -701,10 +954,16 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
     NSString *leftID = prefs[@"leftBundleID"];
     NSString *rightID = prefs[@"rightBundleID"];
-    _leftLabel.text = SplitCarPlayDisplayNameForBundleID(leftID) ?: @"(chưa chọn)";
-    _rightLabel.text = SplitCarPlayDisplayNameForBundleID(rightID) ?: @"(chưa chọn)";
-    _leftTitleIcon.image = SplitCarPlayAppIcon(leftID);
-    _rightTitleIcon.image = SplitCarPlayAppIcon(rightID);
+    _leftIsEmpty = leftID.length == 0;
+    _rightIsEmpty = rightID.length == 0;
+
+    // "+ Tab mới" in the title bar, same as an empty browser tab, when
+    // nothing's picked yet for that box -- the "Gần đây"/"Tất cả app"
+    // empty state below fills the rest (see populateEmptyState:isLeft:).
+    _leftLabel.text = _leftIsEmpty ? @"+  Tab mới" : (SplitCarPlayDisplayNameForBundleID(leftID) ?: leftID);
+    _rightLabel.text = _rightIsEmpty ? @"+  Tab mới" : (SplitCarPlayDisplayNameForBundleID(rightID) ?: rightID);
+    _leftTitleIcon.image = _leftIsEmpty ? nil : SplitCarPlayAppIcon(leftID);
+    _rightTitleIcon.image = _rightIsEmpty ? nil : SplitCarPlayAppIcon(rightID);
 
     // Prefer a real cached app-switcher snapshot (looks like the actual
     // app) over the plain icon -- see this file's header comment. Either
