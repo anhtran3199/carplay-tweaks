@@ -530,6 +530,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 @property (nonatomic, strong) UIViewController *leftAppVC;
 @property (nonatomic, strong) UIViewController *rightAppVC;
 @property (nonatomic, strong) SpeedBubbleView *speedBubble;
+@property (nonatomic, strong) UIButton *closeOverlayButton; // live preview overlay only (see showLivePreviewOverlayWithLeft:right:)
 @property (nonatomic, strong) NSTimer *speedBubbleStaleTimer;
 @property (nonatomic, assign) CGFloat splitRatio; // 0..1, left width fraction
 @property (nonatomic, assign) BOOL speedAudioAlertEnabled;
@@ -685,8 +686,78 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     self.leftAppVC = nil;
     self.rightAppVC = nil;
     self.speedBubble = nil;
+    self.closeOverlayButton = nil;
     [self.speedBubbleStaleTimer invalidate];
     self.speedBubbleStaleTimer = nil;
+}
+
+#pragma mark Live preview overlay (Preferences.app only) — EXPERIMENTAL
+
+// Triggered from the Settings "Mô phỏng" screen's new "thử chạy app thật"
+// button. Unlike activateOnDisplay: above (which targets the CarPlay
+// external display via FBSDisplayConfiguration/UIRootSceneWindow), this
+// targets a plain window on the phone's own main screen -- an ordinary,
+// unprivate way any tweak adds a floating overlay (no different from a
+// "floating button" tweak). The only private-API part reused here is the
+// *existing* hostApp:inContainer: below; displaySceneManagerForCurrentDisplay
+// already calls +[SBSceneManagerCoordinator mainDisplaySceneManager] (not
+// anything CarPlay-specific), which should resolve to the phone's own
+// display when called from here instead of from CarPlayApp -- the premise
+// this whole experiment rests on, prompted by evidence that SidePlay's own
+// "Mô phỏng" tab hosts real, live app content without a CarPlay connection.
+- (void)showLivePreviewOverlayWithLeft:(NSString *)leftBundleID right:(NSString *)rightBundleID {
+    if (self.rootWindow) return; // already showing
+
+    NSDictionary *prefs = [self loadPreferences];
+    self.splitRatio = [prefs[@"splitRatio"] doubleValue] ?: 0.5;
+
+    self.rootWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
+    self.rootWindow.windowLevel = UIWindowLevelAlert + 1;
+    self.rootWindow.backgroundColor = [UIColor blackColor];
+
+    CGRect bounds = self.rootWindow.bounds;
+    self.leftContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    self.leftContainer.clipsToBounds = YES;
+    self.rightContainer = [[UIView alloc] initWithFrame:CGRectZero];
+    self.rightContainer.clipsToBounds = YES;
+
+    self.dividerView = [[UIView alloc] initWithFrame:CGRectZero];
+    self.dividerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+    self.dividerView.layer.cornerRadius = 3;
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
+                                                                           action:@selector(handleDividerPan:)];
+    [self.dividerView addGestureRecognizer:pan];
+    self.dividerView.userInteractionEnabled = YES;
+
+    CGFloat cardWidth = 116, cardHeight = 150;
+    self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - cardWidth - 16,
+                                                                           56, cardWidth, cardHeight)];
+
+    self.closeOverlayButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [self.closeOverlayButton setTitle:@"✕ Đóng thử nghiệm" forState:UIControlStateNormal];
+    self.closeOverlayButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
+    self.closeOverlayButton.tintColor = [UIColor whiteColor];
+    self.closeOverlayButton.layer.cornerRadius = 8;
+    self.closeOverlayButton.frame = CGRectMake(12, 44, 170, 36);
+    [self.closeOverlayButton addTarget:self action:@selector(hideLivePreviewOverlay)
+                       forControlEvents:UIControlEventTouchUpInside];
+
+    [self.rootWindow addSubview:self.leftContainer];
+    [self.rootWindow addSubview:self.rightContainer];
+    [self.rootWindow addSubview:self.dividerView];
+    [self.rootWindow addSubview:self.speedBubble]; // on top, so it floats over both halves
+    [self.rootWindow addSubview:self.closeOverlayButton]; // topmost -- always reachable to get out
+
+    [self hostApp:leftBundleID inContainer:self.leftContainer replacingExisting:&_leftAppVC];
+    [self hostApp:rightBundleID inContainer:self.rightContainer replacingExisting:&_rightAppVC];
+    [self layoutContainers];
+
+    self.rootWindow.hidden = NO;
+    [self.rootWindow makeKeyAndVisible];
+}
+
+- (void)hideLivePreviewOverlay {
+    [self teardown];
 }
 
 #pragma mark Speed bubble (data comes from VietmapLiveHook.xm, same dylib)
@@ -844,12 +915,56 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
 
 %ctor {
     @autoreleasepool {
+        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
+
+        if ([bundleID isEqualToString:@"com.apple.Preferences"]) {
+            // EXPERIMENTAL: lets the Settings "Mô phỏng" screen trigger a
+            // real hostApp: attempt in a plain overlay on the phone's own
+            // screen instead of requiring an actual CarPlay connection --
+            // see showLivePreviewOverlayWithLeft:right:'s header comment.
+            SplitCarPlayLoadMediaRemote();
+
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL,
+                (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                            const void *object, CFDictionaryRef userInfo) {
+                    NSDictionary *prefs = [[SplitCarPlayController sharedInstance] loadPreferences];
+                    [[SplitCarPlayController sharedInstance] showLivePreviewOverlayWithLeft:prefs[@"leftBundleID"]
+                                                                                        right:prefs[@"rightBundleID"]];
+                },
+                (__bridge CFStringRef)@"com.example.splitcarplay/show-live-preview",
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+
+            CFNotificationCenterAddObserver(
+                CFNotificationCenterGetDarwinNotifyCenter(),
+                NULL,
+                (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                            const void *object, CFDictionaryRef userInfo) {
+                    [[SplitCarPlayController sharedInstance] hideLivePreviewOverlay];
+                },
+                (__bridge CFStringRef)@"com.example.splitcarplay/hide-live-preview",
+                NULL,
+                CFNotificationSuspensionBehaviorDeliverImmediately);
+
+            // Safety net: don't leave the overlay stuck on top of Settings
+            // if the user leaves the app some other way than the close
+            // button (e.g. the home indicator / app switcher).
+            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
+                                                                object:nil
+                                                                 queue:nil
+                                                            usingBlock:^(NSNotification *note) {
+                [[SplitCarPlayController sharedInstance] hideLivePreviewOverlay];
+            }];
+            return;
+        }
+
         // This dylib is now also injected into Vietmap Live (see
         // VietmapLiveHook.xm's header comment) -- none of the CarPlay
         // window/split-view code below is relevant there, so bail out
         // immediately if we're not in one of the two processes it's
         // actually meant for.
-        NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
         if (![bundleID isEqualToString:@"com.apple.CarPlayApp"] &&
             ![bundleID isEqualToString:@"com.apple.springboard"]) {
             return;

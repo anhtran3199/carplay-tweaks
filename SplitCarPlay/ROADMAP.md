@@ -107,6 +107,31 @@ in, so this list builds on work already validated as the right direction.
       Vietmap Live on CarPlay Disconnect" (off by default — opt-in since
       it's a more surprising action than the others).
 
+- [x] **EXPERIMENTAL: "thử chạy app thật" button in Preview** — prompted
+      by screenshots of SidePlay's own "Mô phỏng" tab showing real, live
+      app content (a real Vietmap Live splash screen with its actual
+      version string and "Đang tải dữ liệu bản đồ..." loading state; a
+      real YouTube header/tab-bar chrome) **with no CarPlay connected at
+      all** — contradicting the earlier assumption in this file that live
+      hosting requires an actual CarPlay display. The likely explanation:
+      `displaySceneManagerForCurrentDisplay` already only ever calls
+      `+[SBSceneManagerCoordinator mainDisplaySceneManager]` (not
+      anything CarPlay-specific) — so calling the existing `hostApp:
+      inContainer:` from a process on the phone's own main display,
+      instead of from CarPlayApp, might resolve to the phone's screen
+      instead and just work. Implemented as: `com.apple.Preferences`
+      added to `SplitCarPlay.plist`'s injected bundles; a Darwin
+      notification from the new button in
+      `SplitCarPlayPreviewController.m` triggers
+      `showLivePreviewOverlayWithLeft:right:` (`Tweak.xm`) to build a
+      plain full-screen `UIWindow` (ordinary overlay-window technique,
+      not CarPlay's `UIRootSceneWindow`/`FBSDisplayConfiguration` path)
+      and attempt the exact same `hostApp:inContainer:` used for the real
+      feature. **Still ADAPT** — no new private API beyond what Tweak.xm
+      already used, but never confirmed from this entry point; failure
+      mode is contained to Preferences.app (worst case: force-quit
+      Settings and reopen).
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

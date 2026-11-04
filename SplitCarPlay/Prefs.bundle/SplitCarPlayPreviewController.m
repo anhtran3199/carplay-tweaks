@@ -415,6 +415,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     UISegmentedControl *_styleControl;
     UISegmentedControl *_positionControl;
     UILabel *_captionLabel;
+    UIButton *_tryLiveButton;
     UIView *_dividerHandle;
     CGFloat _splitRatio;
     CGFloat _dragStartRatio;
@@ -474,8 +475,24 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = @"Xem trước giao diện — không cần cắm CarPlay thật. Kéo thanh ở giữa để đổi tỉ lệ chia màn hình, đổi kiểu/vị trí bên dưới để xem ngay. Đây chỉ là ảnh xem trước (không bấm vào app được) — 2 app chỉ thật sự chạy và thao tác được khi cắm CarPlay thật.";
+    _captionLabel.text = @"Khung bên trên chỉ là ảnh xem trước tĩnh (không bấm vào app được) — kéo thanh ở giữa để đổi tỉ lệ chia màn hình, đổi kiểu/vị trí bên dưới để xem ngay. Nút bên dưới thử chạy app thật trực tiếp trên điện thoại (thử nghiệm — không cần CarPlay, nhưng có thể không chạy được; nếu màn hình bị kẹt, thoát Settings rồi mở lại).";
     [self.view addSubview:_captionLabel];
+
+    // EXPERIMENTAL: posts a Darwin notification that Tweak.xm (also
+    // injected into this process, com.apple.Preferences -- see
+    // SplitCarPlay.plist) picks up to attempt the exact same hostApp:
+    // mechanism built for CarPlay, but in a plain overlay window on the
+    // phone's own screen instead -- prompted by evidence that SidePlay's
+    // own "Mô phỏng" hosts real, live app content without any CarPlay
+    // connection. See showLivePreviewOverlayWithLeft:right: in Tweak.xm.
+    _tryLiveButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [_tryLiveButton setTitle:@"Thử chạy app thật (thử nghiệm)" forState:UIControlStateNormal];
+    _tryLiveButton.backgroundColor = [UIColor colorWithRed:0.2 green:0.48 blue:0.9 alpha:1];
+    [_tryLiveButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    _tryLiveButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _tryLiveButton.layer.cornerRadius = 10;
+    [_tryLiveButton addTarget:self action:@selector(tryLiveTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_tryLiveButton];
 
     _bubble = [[SplitCarPlayPreviewBubbleView alloc] initWithFrame:CGRectZero];
     [self.view addSubview:_bubble];
@@ -514,6 +531,23 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
     [self refresh]; // picked app / live Vietmap data may have changed since last time
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    // Safety net for the overlay Tweak.xm's %ctor sets up in this same
+    // process -- don't leave it running if the user just navigates away
+    // within Settings (UIApplicationDidEnterBackgroundNotification there
+    // only covers actually leaving the app).
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                          (__bridge CFStringRef)@"com.example.splitcarplay/hide-live-preview",
+                                          NULL, NULL, YES);
+}
+
+- (void)tryLiveTapped {
+    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                          (__bridge CFStringRef)@"com.example.splitcarplay/show-live-preview",
+                                          NULL, NULL, YES);
 }
 
 - (UIView *)makePlaceholder {
@@ -623,7 +657,8 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
     _styleControl.frame = CGRectMake(16, CGRectGetMaxY(_leftPlaceholder.frame) + 20, bounds.size.width - 32, 32);
     _positionControl.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 32);
-    _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 60);
+    _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 80);
+    _tryLiveButton.frame = CGRectMake(16, CGRectGetMaxY(_captionLabel.frame) + 8, bounds.size.width - 32, 46);
 }
 
 - (void)layoutTitleBar:(UIView *)bar icon:(UIImageView *)icon label:(UILabel *)label {
