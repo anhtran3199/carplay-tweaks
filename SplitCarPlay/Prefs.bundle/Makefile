@@ -12,7 +12,7 @@ BUNDLE_NAME = SplitCarPlayPrefs
 SplitCarPlayPrefs_FILES = SplitCarPlayPrefsListController.m SplitCarPlayAppPickerController.m SplitCarPlayPreviewController.m
 SplitCarPlayPrefs_INSTALL_PATH = /Library/PreferenceBundles
 SplitCarPlayPrefs_CFLAGS = -fobjc-arc
-SplitCarPlayPrefs_FRAMEWORKS = UIKit QuartzCore
+SplitCarPlayPrefs_FRAMEWORKS = UIKit QuartzCore Metal MetalKit CoreImage
 SplitCarPlayPrefs_PRIVATE_FRAMEWORKS = Preferences
 
 include $(THEOS_MAKE_PATH)/bundle.mk

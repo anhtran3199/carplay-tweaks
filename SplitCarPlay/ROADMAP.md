@@ -25,6 +25,23 @@ in, so this list builds on work already validated as the right direction.
       (dlopen'd, not linked — see `Tweak.xm`'s header comment), shown as
       "Title — Artist" text in the Card/Bar extras row. Toggle:
       "Show Now Playing".
+- [x] **Preview shows a real app-switcher snapshot, not just an icon** —
+      traced the "SidePlay2 shows a live app" question down to its real
+      binary: its "Mô phỏng" actually uses Apple's **public** CarPlay
+      framework (`CPTemplateApplicationScene`/`CPInterfaceController` —
+      confirmed real strings in `SidePlay2.app`'s own executable), which
+      can only show Apple's own templates, not arbitrary video/WebView
+      content — so the YouTube-looking content in the screenshot that
+      prompted this almost certainly wasn't a live render at all. Far
+      more likely: iOS's own **app-switcher snapshot** feature (every
+      backgrounded app's last-seen appearance is cached to disk,
+      normally just for multitasking — readable by any process on a
+      jailbroken device). `SplitCarPlayPreviewController.m` now finds and
+      decodes that cached image (iOS 13+ stores it as a GPU-compressed
+      `.ktx` texture, decoded via MetalKit; plain `.png`/`.jpg` also
+      handled) for each picked app, filling the placeholder box
+      edge-to-edge like a real screenshot — falls back to the plain icon
+      on any failure (app never backgrounded, decode error, ...).
 - [x] **Preview/simulation screen** — Settings → "Mô phỏng (Preview)"
       renders the real bubble (all 3 styles + left/right position,
       switchable live) plus app placeholders showing the real app icon

@@ -17,22 +17,127 @@
 //  state file is a plain path on disk, readable from any process) or
 //  clearly-labeled demo numbers when there's nothing real to show yet.
 //
-//  WHY THE APP PLACEHOLDERS SHOW AN ICON, NOT A LIVE APP VIEW
+//  APP PLACEHOLDERS: A REAL SNAPSHOT WHEN ONE EXISTS, ELSE THE ICON
 //
-//  SidePlay2's own preview actually renders its navigation app live.
-//  That's not reproducible here: Settings.app/Preferences.app has no way
-//  to host another app's scene the way CarPlayApp can (the exact
-//  mechanism `Tweak.xm`'s `hostApp:inContainer:replacingExisting:` uses,
-//  and still marked ADAPT/untested there) — this process simply isn't
-//  CarPlayApp. Showing the real app icon (same private API the picker
-//  list already uses) is the honest, safe middle ground: more "alive"
-//  looking than plain text, without pretending to do something this
-//  process can't actually do.
+//  SidePlay2's own "Mô phỏng" turned out to use Apple's PUBLIC CarPlay
+//  framework (CPTemplateApplicationScene/CPInterfaceController -- real
+//  strings in their binary, confirmed by scanning it the same way as
+//  everywhere else in this project) for ITS OWN CarPlay UI, which can
+//  only show Apple's own templates (maps/lists/alerts) -- it cannot
+//  embed arbitrary video/WebView content like a YouTube feed. The
+//  YouTube-looking content in the screenshot that prompted this is
+//  almost certainly NOT a live render at all: it's very likely iOS's own
+//  **app-switcher snapshot** -- a real, standard iOS feature where every
+//  backgrounded app has its last-seen appearance cached to disk as an
+//  image, normally just for the multitasking UI, but readable by any
+//  process on a jailbroken device.
+//
+//  So that's what this does: finds the picked app's container (scanning
+//  /var/mobile/Containers/Data/Application/*/.com.apple.mobile_container_manager.metadata.plist
+//  for a matching MCMMetadataIdentifier -- a standard technique, not a
+//  private API), then the newest file under its
+//  Library/SplashBoard/Snapshots or Library/Caches/Snapshots. iOS 13+
+//  (this device's iOS 15.8.8 included) stores these as **.ktx** files --
+//  a GPU-compressed texture format, not a plain image -- decoded here via
+//  MetalKit; older-style plain .png/.jpg snapshots are also handled.
+//  Every step degrades to nil on failure (wrong path guess, decode
+//  error, app never backgrounded so no snapshot exists yet, ...) and the
+//  caller always falls back to the plain app icon -- never a crash,
+//  never a blank box.
 //
 #import <UIKit/UIKit.h>
+#import <Metal/Metal.h>
+#import <MetalKit/MetalKit.h>
+#import <CoreImage/CoreImage.h>
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // SplitCarPlayAppPickerController.m
 extern UIImage *SplitCarPlayAppIcon(NSString *bundleID); // SplitCarPlayAppPickerController.m
+
+#pragma mark - App-switcher snapshot lookup (see header comment)
+
+static NSString *SplitCarPlayFindContainerPath(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    NSString *base = @"/var/mobile/Containers/Data/Application";
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *dirs = [fm contentsOfDirectoryAtPath:base error:nil];
+    for (NSString *dir in dirs) {
+        NSString *metadataPath = [NSString stringWithFormat:@"%@/%@/.com.apple.mobile_container_manager.metadata.plist", base, dir];
+        NSDictionary *metadata = [NSDictionary dictionaryWithContentsOfFile:metadataPath];
+        if ([metadata[@"MCMMetadataIdentifier"] isEqualToString:bundleID]) {
+            return [base stringByAppendingPathComponent:dir];
+        }
+    }
+    return nil;
+}
+
+// Most recently modified image-like file under either known snapshot
+// location, searched recursively (the real layout nests snapshots under
+// a per-scene subfolder whose exact name isn't worth hardcoding).
+static NSString *SplitCarPlayFindSnapshotFile(NSString *containerPath) {
+    if (containerPath.length == 0) return nil;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSArray<NSString *> *roots = @[
+        [containerPath stringByAppendingPathComponent:@"Library/SplashBoard/Snapshots"],
+        [containerPath stringByAppendingPathComponent:@"Library/Caches/Snapshots"],
+    ];
+    NSString *bestPath = nil;
+    NSDate *bestDate = nil;
+    for (NSString *root in roots) {
+        NSDirectoryEnumerator *enumerator = [fm enumeratorAtPath:root];
+        for (NSString *relativePath in enumerator) {
+            NSString *lower = relativePath.lowercaseString;
+            if (![lower hasSuffix:@".png"] && ![lower hasSuffix:@".ktx"] && ![lower hasSuffix:@".jpg"]) continue;
+            NSString *fullPath = [root stringByAppendingPathComponent:relativePath];
+            NSDictionary *attrs = [fm attributesOfItemAtPath:fullPath error:nil];
+            NSDate *modDate = attrs[NSFileModificationDate];
+            if (!bestDate || [modDate compare:bestDate] == NSOrderedDescending) {
+                bestDate = modDate;
+                bestPath = fullPath;
+            }
+        }
+    }
+    return bestPath;
+}
+
+static UIImage *SplitCarPlayLoadKTXImage(NSString *path) {
+    id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+    if (!device) return nil;
+    MTKTextureLoader *loader = [[MTKTextureLoader alloc] initWithDevice:device];
+    NSError *error = nil;
+    id<MTLTexture> texture = [loader newTextureWithContentsOfURL:[NSURL fileURLWithPath:path]
+                                                           options:nil
+                                                             error:&error];
+    if (!texture) return nil;
+    CIImage *ciImage = [CIImage imageWithMTLTexture:texture options:nil];
+    if (!ciImage) return nil;
+    CIContext *context = [CIContext context];
+    CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
+    if (!cgImage) return nil;
+    UIImage *image = [UIImage imageWithCGImage:cgImage];
+    CGImageRelease(cgImage);
+    return image;
+}
+
+// Public, not static -- used by SplitCarPlayPreviewController below.
+// Returns nil on ANY failure (not found, wrong format guess, decode
+// error); always pair with an icon fallback.
+UIImage *SplitCarPlayAppSnapshot(NSString *bundleID) {
+    NSString *containerPath = SplitCarPlayFindContainerPath(bundleID);
+    NSString *snapshotPath = SplitCarPlayFindSnapshotFile(containerPath);
+    if (snapshotPath.length == 0) return nil;
+    NSString *lower = snapshotPath.lowercaseString;
+    @try {
+        if ([lower hasSuffix:@".png"] || [lower hasSuffix:@".jpg"]) {
+            return [UIImage imageWithContentsOfFile:snapshotPath];
+        }
+        if ([lower hasSuffix:@".ktx"]) {
+            return SplitCarPlayLoadKTXImage(snapshotPath);
+        }
+    } @catch (NSException *exception) {
+        return nil;
+    }
+    return nil;
+}
 
 typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     SplitCarPlayBubbleStyleCard = 0,
@@ -299,6 +404,8 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     UISegmentedControl *_positionControl;
     UILabel *_captionLabel;
     CGFloat _splitRatio;
+    BOOL _leftHasSnapshot;
+    BOOL _rightHasSnapshot;
 }
 
 - (void)viewDidLoad {
@@ -389,11 +496,12 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _leftPlaceholder.frame = CGRectMake(16, topInset, leftWidth, carScreenHeight);
     _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, rightWidth, carScreenHeight);
 
-    CGFloat iconSize = MIN(56, _leftPlaceholder.bounds.size.width - 24);
-    _leftIconView.frame = CGRectMake((_leftPlaceholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
-    _rightIconView.frame = CGRectMake((_rightPlaceholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
-    _leftLabel.frame = CGRectMake(4, CGRectGetMaxY(_leftIconView.frame) + 8, _leftPlaceholder.bounds.size.width - 8, 32);
-    _rightLabel.frame = CGRectMake(4, CGRectGetMaxY(_rightIconView.frame) + 8, _rightPlaceholder.bounds.size.width - 8, 32);
+    // A real snapshot fills nearly the whole box (it already looks like
+    // the app, same as a real screenshot) with just a small caption
+    // strip at the bottom; falling back to the plain icon keeps the
+    // original small-centered-icon-plus-label layout.
+    [self layoutAppBox:_leftPlaceholder icon:_leftIconView label:_leftLabel hasSnapshot:_leftHasSnapshot];
+    [self layoutAppBox:_rightPlaceholder icon:_rightIconView label:_rightLabel hasSnapshot:_rightHasSnapshot];
 
     CGFloat bubbleW = 116, bubbleH = 188;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
@@ -409,6 +517,27 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     _styleControl.frame = CGRectMake(16, CGRectGetMaxY(_leftPlaceholder.frame) + 20, bounds.size.width - 32, 32);
     _positionControl.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 32);
     _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 60);
+}
+
+- (void)layoutAppBox:(UIView *)placeholder icon:(UIImageView *)icon label:(UILabel *)label hasSnapshot:(BOOL)hasSnapshot {
+    icon.layer.cornerRadius = hasSnapshot ? 0 : 12;
+    if (hasSnapshot) {
+        icon.frame = placeholder.bounds; // fill the box edge-to-edge, like a real screenshot
+        label.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
+        label.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+        label.layer.cornerRadius = 6;
+        label.layer.masksToBounds = YES;
+        CGFloat labelHeight = 18;
+        label.frame = CGRectMake(6, placeholder.bounds.size.height - labelHeight - 6,
+                                  placeholder.bounds.size.width - 12, labelHeight);
+    } else {
+        CGFloat iconSize = MIN(56, placeholder.bounds.size.width - 24);
+        icon.frame = CGRectMake((placeholder.bounds.size.width - iconSize) / 2.0, 70, iconSize, iconSize);
+        label.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+        label.backgroundColor = [UIColor clearColor];
+        label.layer.cornerRadius = 0;
+        label.frame = CGRectMake(4, CGRectGetMaxY(icon.frame) + 8, placeholder.bounds.size.width - 8, 32);
+    }
 }
 
 - (void)styleChanged:(UISegmentedControl *)sender {
@@ -428,8 +557,19 @@ static void SplitCarPlaySetPref(NSString *key, id value) {
     NSString *rightID = prefs[@"rightBundleID"];
     _leftLabel.text = SplitCarPlayDisplayNameForBundleID(leftID) ?: @"(chưa chọn)";
     _rightLabel.text = SplitCarPlayDisplayNameForBundleID(rightID) ?: @"(chưa chọn)";
-    _leftIconView.image = SplitCarPlayAppIcon(leftID);
-    _rightIconView.image = SplitCarPlayAppIcon(rightID);
+
+    // Prefer a real cached app-switcher snapshot (looks like the actual
+    // app) over the plain icon -- see this file's header comment. Either
+    // can be nil (app never backgrounded yet, wrong path guess, decode
+    // failure, nothing picked) with no crash either way.
+    UIImage *leftSnapshot = SplitCarPlayAppSnapshot(leftID);
+    UIImage *rightSnapshot = SplitCarPlayAppSnapshot(rightID);
+    _leftHasSnapshot = leftSnapshot != nil;
+    _rightHasSnapshot = rightSnapshot != nil;
+    _leftIconView.image = leftSnapshot ?: SplitCarPlayAppIcon(leftID);
+    _rightIconView.image = rightSnapshot ?: SplitCarPlayAppIcon(rightID);
+    _leftIconView.contentMode = _leftHasSnapshot ? UIViewContentModeScaleAspectFill : UIViewContentModeScaleAspectFit;
+    _rightIconView.contentMode = _rightHasSnapshot ? UIViewContentModeScaleAspectFill : UIViewContentModeScaleAspectFit;
 
     // Match Tweak.xm's loadPreferences defaults for anything the user
     // hasn't touched yet in Settings -- an untouched PS specifier shows
