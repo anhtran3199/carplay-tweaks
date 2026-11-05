@@ -183,6 +183,33 @@ in, so this list builds on work already validated as the right direction.
       a *loaded* app has no such bar but a *still-loading/picker* one
       does.
 
+## ⚠️ Architecture pivot (2026-11-05)
+
+First real-CarPlay-hardware test of `hostApp:inContainer:` (the private
+`SBApplicationController`/`SBSceneManagerCoordinator`/`SBAppViewController`
+chain) came back: **the CarPlay screen just goes blank** when connected.
+Most likely explanation: the VERIFIED part (creating a `UIRootSceneWindow`
+on the CarPlay display) worked and took over the screen, but every
+ADAPT-level call in `hostApp:` (resolving an application object, getting a
+scene manager, fetching a scene handle, reading `appView`) silently failed
+— so the window exists, is key/visible, and has nothing in it. That's
+actively worse than not having the tweak at all (it breaks normal CarPlay
+use while connected), so as of this version:
+
+- [x] **`reloadFromPreferences` and `showLivePreviewOverlayWithLeft:right:`
+      in `Tweak.xm` are both hard-disabled** (short-circuited with an
+      early `return`, code left in place rather than deleted) — plugging
+      into CarPlay with this tweak installed should now be a no-op again,
+      same as not having it installed.
+- [ ] **Pivoting toward SidePlay's actual product shape instead of
+      CarSplit's**: a standalone companion **app** (not a Settings
+      preferences bundle) with SidePlay's own tab structure -- Trang chủ /
+      Trên xe / Mô phỏng / Tài khoản -- rather than a `Prefs.bundle` panel
+      buried in Settings. The real on-car split-screen mechanism is an
+      open question again (see above); this app is the new home for
+      picking apps, previewing, and (eventually) controlling that feature
+      once there's a working replacement for the broken private-API path.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

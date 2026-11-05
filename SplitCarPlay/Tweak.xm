@@ -728,6 +728,16 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 }
 
 - (void)reloadFromPreferences {
+    // DISABLED pending an architecture pivot -- see ROADMAP.md. First
+    // real-CarPlay-hardware test of hostApp:/activateOnDisplay: left the
+    // CarPlay screen blank (the window got created -- the VERIFIED part
+    // -- but every app-hosting call silently failed, the ADAPT part),
+    // which actively breaks normal CarPlay use while driving. Short-
+    // circuiting here unconditionally until there's a working
+    // replacement, rather than leaving a known-broken feature armed.
+    [self teardown];
+    return;
+
     NSDictionary *prefs = [self loadPreferences];
     self.splitRatio = [prefs[@"splitRatio"] doubleValue];
     self.dividerView.hidden = ![prefs[@"showDivider"] boolValue];
@@ -864,6 +874,14 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 // this whole experiment rests on, prompted by evidence that SidePlay's own
 // "Mô phỏng" tab hosts real, live app content without a CarPlay connection.
 - (void)showLivePreviewOverlayWithLeft:(NSString *)leftBundleID right:(NSString *)rightBundleID {
+    // DISABLED -- same hostApp:/displaySceneManagerForCurrentDisplay
+    // mechanism that just failed its first real-CarPlay test (see
+    // reloadFromPreferences above); no reason to believe this Settings-
+    // triggered variant of the identical call would fare any better.
+    // Left in place rather than deleted in case the broader pivot (see
+    // ROADMAP.md) ends up reusing pieces of it.
+    return;
+
     if (self.rootWindow) return; // already showing
 
     NSDictionary *prefs = [self loadPreferences];
