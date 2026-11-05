@@ -509,6 +509,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 @end
 
 @implementation PreviewViewController {
+    UIView *_carScreenFrame;
     UIView *_leftPlaceholder;
     UIView *_rightPlaceholder;
     UIImageView *_leftIconView;
@@ -554,6 +555,16 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _headingLabel.font = [UIFont boldSystemFontOfSize:34];
     _headingLabel.textColor = [UIColor blackColor];
     [self.view addSubview:_headingLabel];
+
+    // A single outer "car screen" frame wrapping both app boxes together
+    // -- represents the one physical CarPlay display being split in two,
+    // not two independent cards. Added behind the two boxes.
+    _carScreenFrame = [[UIView alloc] init];
+    _carScreenFrame.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
+    _carScreenFrame.layer.cornerRadius = 14;
+    _carScreenFrame.layer.borderWidth = 1;
+    _carScreenFrame.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:1].CGColor;
+    [self.view addSubview:_carScreenFrame];
 
     _leftPlaceholder = [self makePlaceholder];
     _rightPlaceholder = [self makePlaceholder];
@@ -749,6 +760,9 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     CGFloat rightWidth = usableWidth - leftWidth;
     _leftPlaceholder.frame = CGRectMake(16, topInset, leftWidth, carScreenHeight);
     _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, rightWidth, carScreenHeight);
+
+    CGFloat framePad = 6;
+    _carScreenFrame.frame = CGRectInset(CGRectUnion(_leftPlaceholder.frame, _rightPlaceholder.frame), -framePad, -framePad);
 
     // A wider invisible hit area than the thin visible line, centered on
     // the boundary between the two placeholders, so it's actually easy

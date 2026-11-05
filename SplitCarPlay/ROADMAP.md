@@ -262,6 +262,13 @@ use while connected), so as of this version:
       real-CarPlay test should at minimum produce evidence of exactly
       which step fails, instead of nothing.
 
+- [x] **Outer "car screen" frame around both app boxes** — the two app
+      boxes now sit inside one shared light-gray bordered frame
+      (`_carScreenFrame`, a `CGRectUnion` of both boxes' frames with
+      some padding) instead of being two independent cards placed next
+      to each other, representing the single physical CarPlay display
+      they're splitting. Layout/color only.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,
