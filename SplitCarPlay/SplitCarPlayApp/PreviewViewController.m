@@ -522,6 +522,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     PreviewBubbleView *_bubble;
     UISegmentedControl *_styleControl;
     UISegmentedControl *_positionControl;
+    UILabel *_headingLabel;
     UILabel *_captionLabel;
     UIView *_dividerHandle;
     CGFloat _splitRatio;
@@ -541,7 +542,18 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Mô phỏng";
-    self.view.backgroundColor = [UIColor blackColor];
+    // Reference screenshots show a big bold heading directly on a white
+    // page, no visible nav bar -- not a thin standard nav-bar title on a
+    // dark background (how this screen looked before). Hides the nav
+    // bar for just this tab's own navigation controller and draws the
+    // heading as a real label instead.
+    self.view.backgroundColor = [UIColor whiteColor];
+
+    _headingLabel = [[UILabel alloc] init];
+    _headingLabel.text = @"Mô phỏng";
+    _headingLabel.font = [UIFont boldSystemFontOfSize:34];
+    _headingLabel.textColor = [UIColor blackColor];
+    [self.view addSubview:_headingLabel];
 
     _leftPlaceholder = [self makePlaceholder];
     _rightPlaceholder = [self makePlaceholder];
@@ -609,7 +621,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     [self.view addSubview:_positionControl];
 
     _captionLabel = [[UILabel alloc] init];
-    _captionLabel.textColor = [UIColor colorWithWhite:0.7 alpha:1];
+    _captionLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
@@ -634,7 +646,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     // "Split Ratio" slider on the "Trên xe" tab controls, so either one
     // moves the other.
     _dividerHandle = [[UIView alloc] init];
-    _dividerHandle.backgroundColor = [UIColor colorWithWhite:1 alpha:0.35];
+    _dividerHandle.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
     _dividerHandle.layer.cornerRadius = 3;
     [self.view addSubview:_dividerHandle];
     UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDividerPan:)];
@@ -663,14 +675,17 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
+    self.navigationController.navigationBarHidden = YES; // this tab only -- the big _headingLabel replaces it, matching the reference screenshots
     [self refresh]; // picked app / live Vietmap data may have changed since last time
 }
 
 - (UIView *)makePlaceholder {
     UIView *view = [[UIView alloc] init];
-    view.backgroundColor = [UIColor colorWithWhite:0.15 alpha:1];
+    view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
     view.layer.cornerRadius = 8;
     view.layer.masksToBounds = YES; // keep the title bar's top corners and the snapshot's edges inside the rounded card
+    view.layer.borderWidth = 1;
+    view.layer.borderColor = [UIColor colorWithWhite:0.85 alpha:1].CGColor; // card definition against the white page, matching the reference screenshots' light theme
     return view;
 }
 
@@ -684,7 +699,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
 - (UIView *)makeTitleBarWithDots {
     UIView *bar = [[UIView alloc] init];
-    bar.backgroundColor = [UIColor colorWithWhite:0.24 alpha:1];
+    bar.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
     NSArray<UIColor *> *dotColors = @[
         [UIColor colorWithRed:1.0 green:0.37 blue:0.34 alpha:1],  // red
         [UIColor colorWithRed:1.0 green:0.74 blue:0.18 alpha:1],  // yellow
@@ -711,7 +726,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
 - (UILabel *)makeTitleBarLabel {
     UILabel *label = [[UILabel alloc] init];
-    label.textColor = [UIColor colorWithWhite:0.88 alpha:1];
+    label.textColor = [UIColor colorWithWhite:0.15 alpha:1];
     label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
     label.textAlignment = NSTextAlignmentLeft;
     label.numberOfLines = 1;
@@ -722,7 +737,9 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect bounds = self.view.bounds;
-    CGFloat topInset = self.view.safeAreaInsets.top + 12;
+
+    _headingLabel.frame = CGRectMake(16, self.view.safeAreaInsets.top + 8, bounds.size.width - 32, 42);
+    CGFloat topInset = CGRectGetMaxY(_headingLabel.frame) + 16;
     CGFloat carScreenHeight = 220;
 
     CGFloat dividerWidth = 4;
@@ -881,7 +898,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, 38, itemW, 14)];
         label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
         label.font = [UIFont systemFontOfSize:9];
-        label.textColor = [UIColor whiteColor];
+        label.textColor = [UIColor colorWithWhite:0.15 alpha:1];
         label.textAlignment = NSTextAlignmentCenter;
         label.userInteractionEnabled = NO;
         [button addSubview:label];

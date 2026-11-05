@@ -233,6 +233,17 @@ use while connected), so as of this version:
       controlling that feature once there's a working replacement for
       the broken private-API path.
 
+- [x] **"Mô phỏng" re-themed to match the reference screenshots' light
+      look** — the screen (and the shared app picker) was dark-themed;
+      SidePlay's actual screenshots are consistently light (white page,
+      bold black "Mô phỏng" heading, light-gray app-box cards with a
+      thin border instead of a shadow, dark text throughout). Also adds
+      a real large heading label and hides the nav bar for this tab
+      (the reference has no visible nav bar, just the big title). Kept
+      deliberately at the layout/color level only — no logos, icons, or
+      branding copied; see the "Explicitly not planning to copy" note
+      below, which still applies.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

@@ -164,10 +164,15 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     UITapGestureRecognizer *dimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)];
     [self.view addGestureRecognizer:dimTap];
 
+    // White card with a thin light-gray border -- matches the reference
+    // screenshot's "Chọn app ô 1/2" look (light theme, not the dark
+    // sheet this used to be).
     UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor colorWithWhite:0.14 alpha:1];
+    card.backgroundColor = [UIColor whiteColor];
     card.layer.cornerRadius = 14;
     card.layer.masksToBounds = YES;
+    card.layer.borderWidth = 1;
+    card.layer.borderColor = [UIColor colorWithWhite:0.85 alpha:1].CGColor;
     card.tag = 9001;
     [self.view addSubview:card];
     // Eat taps on the card itself so they don't fall through to the dim
@@ -177,13 +182,13 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     UILabel *titleLabel = [[UILabel alloc] init];
     titleLabel.text = self.pickerTitle;
     titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    titleLabel.textColor = [UIColor whiteColor];
+    titleLabel.textColor = [UIColor blackColor];
     titleLabel.tag = 9002;
     [card addSubview:titleLabel];
 
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
     [closeButton setTitle:@"✕" forState:UIControlStateNormal];
-    closeButton.tintColor = [UIColor colorWithWhite:0.7 alpha:1];
+    closeButton.tintColor = [UIColor colorWithWhite:0.5 alpha:1];
     closeButton.tag = 9003;
     [closeButton addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
     [card addSubview:closeButton];
@@ -264,7 +269,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, itemIconSize + 2, itemWidth, 16)];
         label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
         label.font = [UIFont systemFontOfSize:11];
-        label.textColor = [UIColor whiteColor];
+        label.textColor = [UIColor blackColor];
         label.textAlignment = NSTextAlignmentCenter;
         label.lineBreakMode = NSLineBreakByTruncatingTail;
         label.userInteractionEnabled = NO;
