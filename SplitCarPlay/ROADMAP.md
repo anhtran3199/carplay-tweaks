@@ -201,14 +201,37 @@ use while connected), so as of this version:
       early `return`, code left in place rather than deleted) — plugging
       into CarPlay with this tweak installed should now be a no-op again,
       same as not having it installed.
-- [ ] **Pivoting toward SidePlay's actual product shape instead of
-      CarSplit's**: a standalone companion **app** (not a Settings
-      preferences bundle) with SidePlay's own tab structure -- Trang chủ /
-      Trên xe / Mô phỏng / Tài khoản -- rather than a `Prefs.bundle` panel
-      buried in Settings. The real on-car split-screen mechanism is an
-      open question again (see above); this app is the new home for
-      picking apps, previewing, and (eventually) controlling that feature
-      once there's a working replacement for the broken private-API path.
+- [x] **Standalone companion app scaffolded** (`SplitCarPlayApp/`, a real
+      Theos `application.mk` target, not a Settings preferences bundle)
+      with SidePlay's own tab structure:
+        - **Trang chủ** -- short status screen (current left/right pick,
+          enabled state) + an honest banner that real on-car hosting is
+          disabled right now.
+        - **Trên xe** -- native UIKit re-implementation of the old
+          Root.plist settings (app pickers, split ratio, bubble style/
+          position/scale, speed-card toggles, source-app toggles) --
+          same shared prefs file/keys, just a plain `UITableViewController`
+          instead of PSSpecifiers now that there's no Settings-navigation
+          constraint.
+        - **Mô phỏng** -- the exact same preview (bubble styles, drag/
+          pinch-resize, app-switcher snapshots, "Tab mới" empty state)
+          ported from `Prefs.bundle/SplitCarPlayPreviewController.m`,
+          minus the now-removed "thử chạy app thật" experiment.
+        - **Tài khoản** -- stub (version/credits) -- SplitCarPlay has no
+          account system and needs none; this tab exists only to match
+          the shape.
+      The grid-style "Chọn app..." picker is now a single shared
+      `AppPickerController`, presented modally, reused by both "Trên xe"
+      and "Mô phỏng" (previously two separate copies across different
+      processes; this app is one binary, so genuine reuse is possible
+      now). Installs a real SpringBoard icon via a `uicache` post-install
+      hook. **Not yet tested on-device** -- built without access to a
+      macOS/Theos toolchain locally, so this is unverified until CI
+      builds it and it's actually installed. The real on-car split-screen
+      mechanism is still an open question (see above); this app is the
+      new home for picking apps, previewing, and (eventually)
+      controlling that feature once there's a working replacement for
+      the broken private-API path.
 
 ## CarPlay app-hosting foundation
 

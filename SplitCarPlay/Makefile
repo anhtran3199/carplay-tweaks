@@ -20,5 +20,5 @@ SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore AudioToolbox
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-SUBPROJECTS += Prefs.bundle
+SUBPROJECTS += Prefs.bundle SplitCarPlayApp
 include $(THEOS_MAKE_PATH)/aggregate.mk
