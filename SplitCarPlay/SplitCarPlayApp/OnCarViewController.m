@@ -30,9 +30,50 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
 @property (nonatomic, assign) SplitCarPlayRowKind kind;
 @property (nonatomic, assign) CGFloat sliderMin;
 @property (nonatomic, assign) CGFloat sliderMax;
+@property (nonatomic, assign) BOOL defaultOn; // SplitCarPlayRowKindSwitch only -- must match Tweak.xm's loadPreferences defaults
 @property (nonatomic, copy) NSString *buttonAction; // selector name as string, resolved in cellForRow
 @end
 @implementation SplitCarPlayRow
+@end
+
+#pragma mark - Log viewer (for the experimental section below)
+
+static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
+
+@interface LogViewerController : UIViewController
+@end
+
+@implementation LogViewerController {
+    UITextView *_textView;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Log debug";
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
+
+    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                                                                                              target:self action:@selector(reload)];
+
+    _textView = [[UITextView alloc] init];
+    _textView.editable = NO;
+    _textView.font = [UIFont fontWithName:@"Menlo" size:11] ?: [UIFont systemFontOfSize:11];
+    [self.view addSubview:_textView];
+
+    [self reload];
+}
+
+- (void)reload {
+    NSString *content = [NSString stringWithContentsOfFile:kHostingLogPath encoding:NSUTF8StringEncoding error:nil];
+    _textView.text = content.length > 0 ? content
+        : @"(Chưa có log — log chỉ được ghi khi \"Bật thử nghiệm\" ở trên đang BẬT và CarPlay thật được cắm vào.)";
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    _textView.frame = self.view.bounds;
+}
+
 @end
 
 @interface OnCarViewController : UITableViewController
@@ -40,6 +81,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
 
 @implementation OnCarViewController {
     NSArray<NSString *> *_sectionTitles;
+    NSArray<NSString *> *_sectionFooters;
     NSArray<NSArray<SplitCarPlayRow *> *> *_sections;
 }
 
@@ -49,8 +91,12 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
 }
 
 - (SplitCarPlayRow *)rowSwitch:(NSString *)label key:(NSString *)key {
+    return [self rowSwitch:label key:key default:YES];
+}
+
+- (SplitCarPlayRow *)rowSwitch:(NSString *)label key:(NSString *)key default:(BOOL)defaultOn {
     SplitCarPlayRow *row = [SplitCarPlayRow new];
-    row.label = label; row.key = key; row.kind = SplitCarPlayRowKindSwitch;
+    row.label = label; row.key = key; row.kind = SplitCarPlayRowKindSwitch; row.defaultOn = defaultOn;
     return row;
 }
 
@@ -71,7 +117,11 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
     [super viewDidLoad];
     self.title = @"Trên xe";
 
-    _sectionTitles = @[@"Trạng thái", @"Ứng dụng", @"Bố cục", @"Thẻ tốc độ", @"Ứng dụng nguồn (Vietmap Live)"];
+    _sectionTitles = @[@"Trạng thái", @"Ứng dụng", @"Bố cục", @"Thẻ tốc độ", @"Ứng dụng nguồn (Vietmap Live)", @"Thử nghiệm: chia màn hình CarPlay thật"];
+    _sectionFooters = @[
+        @"", @"", @"", @"", @"",
+        @"⚠️ Lần test CarPlay thật gần nhất bị trống màn hình. Chỉ bật mục này nếu bạn chủ động muốn thử lại và chấp nhận rủi ro đó — khi BẬT, mọi bước sẽ được ghi vào log debug bên dưới để biết chính xác bước nào thất bại.",
+    ];
     _sections = @[
         @[ [self rowSwitch:@"Bật tính năng" key:@"enabled"] ],
         @[ [self rowButton:@"Ô 1" key:@"leftBundleID"],
@@ -86,15 +136,10 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
            [self rowSwitch:@"Hiện pin" key:@"showBattery"],
            [self rowSwitch:@"Hiện nhạc đang phát" key:@"showNowPlaying"] ],
         @[ [self rowSwitch:@"Giữ chạy nền" key:@"keepSourceAppAlive"],
-           [self rowSwitch:@"Tự thoát khi rút CarPlay" key:@"autoExitSourceApp"] ],
+           [self rowSwitch:@"Tự thoát khi rút CarPlay" key:@"autoExitSourceApp" default:NO] ],
+        @[ [self rowSwitch:@"⚠️ Bật thử nghiệm" key:@"experimentalHostingEnabled" default:NO],
+           [self rowButton:@"Xem log debug" key:@"_viewLog"] ],
     ];
-
-    UILabel *footer = [[UILabel alloc] initWithFrame:CGRectMake(16, 0, self.view.bounds.size.width - 32, 60)];
-    footer.numberOfLines = 0;
-    footer.font = [UIFont systemFontOfSize:12];
-    footer.textColor = [UIColor secondaryLabelColor];
-    footer.text = @"Lưu ý: tính năng chia màn hình thật trên CarPlay đang tạm tắt (xem tab Trang chủ) — các cài đặt ở đây vẫn được lưu lại cho đến khi tính năng hoạt động trở lại.";
-    self.tableView.tableFooterView = footer;
 }
 
 - (NSDictionary *)prefs {
@@ -121,6 +166,11 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
     return _sectionTitles[section];
 }
 
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    NSString *footer = _sectionFooters[section];
+    return footer.length > 0 ? footer : nil;
+}
+
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
     return _sections[section].count;
 }
@@ -139,7 +189,7 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
     switch (row.kind) {
         case SplitCarPlayRowKindSwitch: {
             UISwitch *toggle = [[UISwitch alloc] init];
-            toggle.on = [self boolForKey:row.key default:YES];
+            toggle.on = [self boolForKey:row.key default:row.defaultOn];
             toggle.tag = indexPath.section * 100 + indexPath.row;
             [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
             objc_setAssociatedObject(toggle, "key", row.key, OBJC_ASSOCIATION_RETAIN);
@@ -204,6 +254,10 @@ typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
     }
     if ([row.key isEqualToString:@"bubblePosition"]) {
         [self presentChoiceForKey:@"bubblePosition" title:@"Vị trí bong bóng" options:@[@"Trái", @"Phải"] indexPath:indexPath];
+        return;
+    }
+    if ([row.key isEqualToString:@"_viewLog"]) {
+        [self.navigationController pushViewController:[[LogViewerController alloc] init] animated:YES];
         return;
     }
 }

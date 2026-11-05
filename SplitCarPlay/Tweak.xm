@@ -69,6 +69,34 @@ static void SplitCarPlayWritePref(NSString *key, id value) {
     [prefs writeToFile:path atomically:YES];
 }
 
+// File-based logging for the CarPlay hosting path (activateOnDisplay:/
+// hostApp:inContainer:) -- there's no way to attach a console to a real
+// car's CarPlay session, so NSLog alone is useless for debugging what
+// actually happens there. Same pattern CarPlayEnableHook.xm already
+// uses for the same reason. Every step gets logged (success AND
+// failure), not just failures, so a log with nothing useful in it is
+// itself informative (means we never even reached that code).
+static void SplitCarPlayHostingLog(NSString *format, ...) {
+    va_list args;
+    va_start(args, format);
+    NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
+    va_end(args);
+
+    NSString *path = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
+    NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
+                                                           dateStyle:NSDateFormatterNoStyle
+                                                           timeStyle:NSDateFormatterMediumStyle];
+    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
+    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    if (!handle) {
+        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+        handle = [NSFileHandle fileHandleForWritingAtPath:path];
+    }
+    [handle seekToEndOfFile];
+    [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
+    [handle closeFile];
+}
+
 static void SplitCarPlayLoadMediaRemote(void) {
     void *handle = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote", RTLD_LAZY);
     if (!handle) return;
@@ -708,6 +736,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:path];
     NSMutableDictionary *merged = [@{
         @"enabled": @YES,
+        @"experimentalHostingEnabled": @NO, // see reloadFromPreferences -- opt-in only, default off since the real CarPlay path is known-broken
         @"leftBundleID": @"com.apple.Maps",
         @"rightBundleID": @"com.apple.Music",
         @"splitRatio": @0.5,
@@ -728,15 +757,26 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 }
 
 - (void)reloadFromPreferences {
-    // DISABLED pending an architecture pivot -- see ROADMAP.md. First
-    // real-CarPlay-hardware test of hostApp:/activateOnDisplay: left the
-    // CarPlay screen blank (the window got created -- the VERIFIED part
-    // -- but every app-hosting call silently failed, the ADAPT part),
-    // which actively breaks normal CarPlay use while driving. Short-
-    // circuiting here unconditionally until there's a working
-    // replacement, rather than leaving a known-broken feature armed.
-    [self teardown];
-    return;
+    // DISABLED BY DEFAULT pending an architecture pivot -- see
+    // ROADMAP.md. First real-CarPlay-hardware test of hostApp:/
+    // activateOnDisplay: left the CarPlay screen blank (the window got
+    // created -- the VERIFIED part -- but every app-hosting call
+    // silently failed, the ADAPT part), which actively breaks normal
+    // CarPlay use while driving.
+    //
+    // "experimentalHostingEnabled" is a SEPARATE flag from "enabled" --
+    // deliberately not reusing "enabled" so this can't get silently
+    // re-armed by anything that still writes the old key. Must be
+    // turned on explicitly (via "Trên xe"'s clearly-labeled warning
+    // toggle) for this to run at all; every step is now logged to
+    // /var/mobile/Library/Logs/splitcarplay_hosting.log (see
+    // SplitCarPlayHostingLog) so a next real-CarPlay test actually
+    // produces debuggable evidence instead of just "blank again."
+    NSDictionary *earlyPrefs = [self loadPreferences];
+    if (![earlyPrefs[@"experimentalHostingEnabled"] boolValue]) {
+        [self teardown];
+        return;
+    }
 
     NSDictionary *prefs = [self loadPreferences];
     self.splitRatio = [prefs[@"splitRatio"] doubleValue];
@@ -797,10 +837,14 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 #pragma mark Window / display setup — VERIFIED path
 
 - (void)activateOnDisplay:(CADisplay *)carPlayDisplay {
+    SplitCarPlayHostingLog(@"activateOnDisplay: begin, carPlayDisplay=%@", carPlayDisplay);
+    @try {
     FBSDisplayConfiguration *config =
         [[objc_getClass("FBSDisplayConfiguration") alloc] initWithCADisplay:carPlayDisplay
                                                                 isMainDisplay:NO];
+    SplitCarPlayHostingLog(@"  FBSDisplayConfiguration = %@", config);
     self.rootWindow = [[objc_getClass("UIRootSceneWindow") alloc] initWithDisplayConfiguration:config];
+    SplitCarPlayHostingLog(@"  rootWindow = %@ bounds=%@", self.rootWindow, NSStringFromCGRect(self.rootWindow.bounds));
     self.rootWindow.backgroundColor = [UIColor blackColor];
 
     CGRect bounds = self.rootWindow.bounds;
@@ -843,8 +887,12 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 
     self.rootWindow.hidden = NO;
     [self.rootWindow makeKeyAndVisible];
+    SplitCarPlayHostingLog(@"  activateOnDisplay: done, window shown");
 
     (void)bounds;
+    } @catch (NSException *exception) {
+        SplitCarPlayHostingLog(@"  EXCEPTION in activateOnDisplay:: %@ -- %@\n%@", exception.name, exception.reason, exception.callStackSymbols);
+    }
 }
 
 - (void)teardown {
@@ -1018,63 +1066,112 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     // hosting this exact bundleID (and bail out early) before re-creating
     // the scene below — omitted here for brevity.
 
-    Class appControllerClass = objc_getClass("SBApplicationController");
-    Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
-    Class appViewControllerClass = objc_getClass("SBAppViewController");
-    if (!appControllerClass || !entityClass || !appViewControllerClass) {
-        NSLog(@"[SplitCarPlay] missing a required private class — adjust names for this iOS version");
-        return;
-    }
+    SplitCarPlayHostingLog(@"hostApp: begin for %@", bundleID);
 
-    id application = [[appControllerClass sharedInstance] applicationWithBundleIdentifier:bundleID];
-    if (!application) {
-        NSLog(@"[SplitCarPlay] could not resolve application object for %@", bundleID);
-        return;
-    }
+    // Wraps the whole ADAPT chain below: if any guessed selector's real
+    // argument/return shape is wrong, calling it on an object that
+    // doesn't actually respond would normally raise an uncaught
+    // NSException and crash/respawn CarPlayApp -- which, with no visible
+    // crash UI on a car's screen, could look identical to "just blank"
+    // to whoever's driving. Catching it here guarantees a log entry
+    // explaining what actually happened, and a plain failed hostApp:
+    // call instead of a process respawn.
+    @try {
+        Class appControllerClass = objc_getClass("SBApplicationController");
+        Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
+        Class appViewControllerClass = objc_getClass("SBAppViewController");
+        SplitCarPlayHostingLog(@"  classes resolved: controller=%@ entity=%@ appVC=%@",
+                                appControllerClass, entityClass, appViewControllerClass);
+        if (!appControllerClass || !entityClass || !appViewControllerClass) {
+            SplitCarPlayHostingLog(@"  ABORT: missing a required private class — adjust names for this iOS version");
+            return;
+        }
 
-    id displaySceneManager = [self displaySceneManagerForCurrentDisplay];
-    if (!displaySceneManager) {
-        NSLog(@"[SplitCarPlay] no scene manager for this display yet (SBSceneManagerCoordinator missing or mainDisplaySceneManager unavailable)");
-        return;
-    }
+        id appController = [appControllerClass respondsToSelector:@selector(sharedInstance)] ? [appControllerClass sharedInstance] : nil;
+        SplitCarPlayHostingLog(@"  SBApplicationController sharedInstance = %@", appController);
+        if (!appController) {
+            SplitCarPlayHostingLog(@"  ABORT: SBApplicationController has no +sharedInstance on this iOS version");
+            return;
+        }
 
-    id sceneIdentity = [displaySceneManager _sceneIdentityForApplication:application
-                                                      createPrimaryIfRequired:YES];
-    // Still ADAPT: SBApplicationSceneHandleRequest's real construction API
-    // (see forward-declaration comment above).
-    id request = [objc_getClass("SBApplicationSceneHandleRequest") requestForApplication:application
-                                                                             sceneIdentity:sceneIdentity];
-    id sceneHandle = [displaySceneManager fetchOrCreateApplicationSceneHandleForRequest:request];
-    if (!sceneHandle) {
-        NSLog(@"[SplitCarPlay] failed to fetch/create scene handle for %@", bundleID);
-        return;
-    }
+        id application = [appController respondsToSelector:@selector(applicationWithBundleIdentifier:)]
+            ? [appController applicationWithBundleIdentifier:bundleID] : nil;
+        SplitCarPlayHostingLog(@"  applicationWithBundleIdentifier:%@ = %@", bundleID, application);
+        if (!application) {
+            SplitCarPlayHostingLog(@"  ABORT: could not resolve application object for %@", bundleID);
+            return;
+        }
 
-    id sceneEntity = [[entityClass alloc] initWithApplicationSceneHandle:sceneHandle];
-    SBAppViewController *appVC = [[appViewControllerClass alloc] initWithIdentifier:bundleID
-                                                           andApplicationSceneEntity:sceneEntity];
-    if (!appVC) return;
+        id displaySceneManager = [self displaySceneManagerForCurrentDisplay];
+        SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay = %@", displaySceneManager);
+        if (!displaySceneManager) {
+            SplitCarPlayHostingLog(@"  ABORT: no scene manager for this display (SBSceneManagerCoordinator missing or mainDisplaySceneManager unavailable)");
+            return;
+        }
 
-    // Prefer the real content view (appView) over the inherited
-    // UIViewController.view -- see the VERIFIED note on the forward
-    // declaration above. Falls back to .view if appView isn't actually
-    // there on this iOS version.
-    UIView *contentView = [appVC respondsToSelector:@selector(appView)] ? appVC.appView : appVC.view;
+        if (![displaySceneManager respondsToSelector:@selector(_sceneIdentityForApplication:createPrimaryIfRequired:)]) {
+            SplitCarPlayHostingLog(@"  ABORT: displaySceneManager does not respond to _sceneIdentityForApplication:createPrimaryIfRequired: (class is %@)", [displaySceneManager class]);
+            return;
+        }
+        id sceneIdentity = [displaySceneManager _sceneIdentityForApplication:application
+                                                          createPrimaryIfRequired:YES];
+        SplitCarPlayHostingLog(@"  sceneIdentity = %@", sceneIdentity);
 
-    [(*slot).view removeFromSuperview];
-    *slot = appVC;
-    contentView.frame = container.bounds;
-    [container addSubview:contentView];
+        // Still ADAPT: SBApplicationSceneHandleRequest's real construction API
+        // (see forward-declaration comment above).
+        Class requestClass = objc_getClass("SBApplicationSceneHandleRequest");
+        if (!requestClass || ![requestClass respondsToSelector:@selector(requestForApplication:sceneIdentity:)]) {
+            SplitCarPlayHostingLog(@"  ABORT: SBApplicationSceneHandleRequest missing or doesn't respond to requestForApplication:sceneIdentity: (class=%@)", requestClass);
+            return;
+        }
+        id request = [requestClass requestForApplication:application sceneIdentity:sceneIdentity];
+        SplitCarPlayHostingLog(@"  request = %@", request);
 
-    // Both ADAPT (selector names are real, but which object answers them
-    // and exactly what's needed to make a hosted scene actually render/
-    // receive touches isn't independently confirmed) -- guarded so a wrong
-    // guess just skips the call instead of crashing.
-    if ([appVC respondsToSelector:@selector(setForeground:)]) {
-        [appVC setForeground:YES];
-    }
-    if ([appVC respondsToSelector:@selector(_updateReferenceSize:andOrientation:)]) {
-        [appVC _updateReferenceSize:container.bounds.size andOrientation:0];
+        if (![displaySceneManager respondsToSelector:@selector(fetchOrCreateApplicationSceneHandleForRequest:)]) {
+            SplitCarPlayHostingLog(@"  ABORT: displaySceneManager does not respond to fetchOrCreateApplicationSceneHandleForRequest:");
+            return;
+        }
+        id sceneHandle = [displaySceneManager fetchOrCreateApplicationSceneHandleForRequest:request];
+        SplitCarPlayHostingLog(@"  sceneHandle = %@", sceneHandle);
+        if (!sceneHandle) {
+            SplitCarPlayHostingLog(@"  ABORT: failed to fetch/create scene handle for %@", bundleID);
+            return;
+        }
+
+        id sceneEntity = [[entityClass alloc] initWithApplicationSceneHandle:sceneHandle];
+        SplitCarPlayHostingLog(@"  sceneEntity = %@", sceneEntity);
+        SBAppViewController *appVC = [[appViewControllerClass alloc] initWithIdentifier:bundleID
+                                                               andApplicationSceneEntity:sceneEntity];
+        SplitCarPlayHostingLog(@"  appVC = %@", appVC);
+        if (!appVC) {
+            SplitCarPlayHostingLog(@"  ABORT: SBAppViewController init returned nil");
+            return;
+        }
+
+        // Prefer the real content view (appView) over the inherited
+        // UIViewController.view -- see the VERIFIED note on the forward
+        // declaration above. Falls back to .view if appView isn't actually
+        // there on this iOS version.
+        BOOL hasAppView = [appVC respondsToSelector:@selector(appView)];
+        UIView *contentView = hasAppView ? appVC.appView : appVC.view;
+        SplitCarPlayHostingLog(@"  hasAppView=%d contentView=%@ bounds=%@", hasAppView, contentView, NSStringFromCGRect(contentView.bounds));
+
+        [(*slot).view removeFromSuperview];
+        *slot = appVC;
+        contentView.frame = container.bounds;
+        [container addSubview:contentView];
+
+        // Both ADAPT (selector names are real, but which object answers them
+        // and exactly what's needed to make a hosted scene actually render/
+        // receive touches isn't independently confirmed) -- guarded so a wrong
+        // guess just skips the call instead of crashing.
+        BOOL hasSetForeground = [appVC respondsToSelector:@selector(setForeground:)];
+        if (hasSetForeground) [appVC setForeground:YES];
+        BOOL hasUpdateReferenceSize = [appVC respondsToSelector:@selector(_updateReferenceSize:andOrientation:)];
+        if (hasUpdateReferenceSize) [appVC _updateReferenceSize:container.bounds.size andOrientation:0];
+        SplitCarPlayHostingLog(@"  hostApp: done for %@ (setForeground=%d updateReferenceSize=%d)", bundleID, hasSetForeground, hasUpdateReferenceSize);
+    } @catch (NSException *exception) {
+        SplitCarPlayHostingLog(@"  EXCEPTION for %@: %@ -- %@\n%@", bundleID, exception.name, exception.reason, exception.callStackSymbols);
     }
 }
 
@@ -1085,8 +1182,14 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     // uncertainty (whether "main" scopes correctly to the CarPlay display
     // from inside this process).
     Class coordinatorClass = objc_getClass("SBSceneManagerCoordinator");
-    if (![coordinatorClass respondsToSelector:@selector(mainDisplaySceneManager)]) return nil;
-    return [coordinatorClass mainDisplaySceneManager];
+    SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: coordinatorClass=%@", coordinatorClass);
+    if (![coordinatorClass respondsToSelector:@selector(mainDisplaySceneManager)]) {
+        SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: ABORT -- doesn't respond to +mainDisplaySceneManager");
+        return nil;
+    }
+    id manager = [coordinatorClass mainDisplaySceneManager];
+    SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: mainDisplaySceneManager = %@ (class %@)", manager, [manager class]);
+    return manager;
 }
 
 @end

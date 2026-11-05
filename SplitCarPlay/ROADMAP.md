@@ -244,6 +244,24 @@ use while connected), so as of this version:
       branding copied; see the "Explicitly not planning to copy" note
       below, which still applies.
 
+- [x] **Diagnostic logging + explicit opt-in for the broken CarPlay path**
+      — rather than keep guessing blind, `hostApp:inContainer:` and
+      `activateOnDisplay:` now log every step (class resolution,
+      intermediate return values, which `respondsToSelector:` check
+      failed if any) to `/var/mobile/Library/Logs/splitcarplay_hosting.log`
+      via the new `SplitCarPlayHostingLog` helper, and both are wrapped
+      in `@try`/`@catch` — if a guessed selector's real signature is
+      wrong, calling it used to risk an uncaught NSException crashing/
+      respawning CarPlayApp (which, with no visible crash UI on a car's
+      screen, could *look* like "just blank" to the driver); now it's
+      caught and logged instead. The whole path stays off by default
+      behind a new, separate `experimentalHostingEnabled` pref (not
+      reusing `enabled`, so nothing can silently re-arm it) — surfaced
+      in "Trên xe" as a clearly-labeled "⚠️ Bật thử nghiệm" switch plus
+      a "Xem log debug" button that reads the log file in-app. Next
+      real-CarPlay test should at minimum produce evidence of exactly
+      which step fails, instead of nothing.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,
