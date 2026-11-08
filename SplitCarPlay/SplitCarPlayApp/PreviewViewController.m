@@ -1385,7 +1385,11 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
     _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
 
+    // Newer of the shared file and the notify-state copy (the file may be
+    // blocked by Vietmap Live's sandbox) -- same rule as Tweak.xm.
     NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
+    NSDictionary *notifyState = SCPReadSpeedState();
+    if ([notifyState[@"timestamp"] doubleValue] > [state[@"timestamp"] doubleValue]) state = notifyState;
     NSNumber *timestamp = state[@"timestamp"];
     BOOL fresh = timestamp && ([[NSDate date] timeIntervalSince1970] - timestamp.doubleValue) < 6.0;
     NSString *speedText = state[@"currentSpeedText"];
