@@ -16,12 +16,18 @@
 //  of CarPlay, so it can be tested without a car. The same code is meant
 //  to replace the CarPlay hosting in Tweak.xm once it works.
 //
+//  The speed bubble is drawn here too, on top of the hosted apps: the
+//  app's own bubble lives in the app's window, which this window covers.
+//
 //  Every private selector is called through objc_msgSend after a
 //  respondsToSelector: check, every step is logged to
-//  /var/mobile/Library/Logs/splitcarplay_hosting.log (prefix "[live]"),
-//  and the whole thing is wrapped in @try. Failure = log + teardown, never
-//  a SpringBoard crash. Safety exits: the ✕ button, the app's own "Dừng"
-//  button, the app leaving the screen, and the device locking.
+//  /var/mobile/Library/Logs/splitcarplay_hosting.log (prefix "[live]").
+//  @try only catches Objective-C exceptions, not FrontBoard assertions
+//  (abort), so the code also avoids the known way to hit one: talking to
+//  the scene of an app that iOS has already killed (two apps at once on
+//  2 GB of RAM). If SpringBoard still dies mid-session, the next
+//  SpringBoard start sees the session marker, turns "2 app" off and tells
+//  the app (livePreviewCrashNotice).
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
@@ -108,6 +114,31 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     return ((BOOL (*)(id, SEL))objc_msgSend)(target, NSSelectorFromString(selName));
 }
 
+#pragma mark - Speed bubble (same class as the CarPlay one, Tweak.xm)
+
+// Implemented in Tweak.xm (same dylib). Looked up with objc_getClass so
+// this file doesn't need its symbol at link time.
+@interface SpeedBubbleView : UIView
+@property (nonatomic, assign) NSInteger style; // SplitCarPlayBubbleStyle: 0 card, 1 ring, 2 bar
+@property (nonatomic, assign) BOOL showDate;
+@property (nonatomic, assign) BOOL showBattery;
+@property (nonatomic, assign) BOOL showNowPlaying;
+@property (nonatomic, assign) CGFloat scale;
+@property (nonatomic, copy) void (^onScaleChanged)(CGFloat scale);
+- (void)applyState:(NSDictionary *)state;
+@end
+
+static NSString * const kSCPLiveVietmapStatePath = @"/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist";
+
+// Natural (unscaled) size of SpeedBubbleView per style, as in Tweak.xm.
+static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
+    switch (style) {
+        case 1: return CGSizeMake(100, 100);
+        case 2: return CGSizeMake(220, 44);
+        default: return CGSizeMake(116, 266);
+    }
+}
+
 #pragma mark - Window that only takes touches on its panes
 
 @interface SCPLivePassthroughWindow : UIWindow
@@ -128,10 +159,15 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIView *container;
 @property (nonatomic, strong) UIView *loadingView;
+@property (nonatomic, strong) id application;       // SBApplication
 @property (nonatomic, strong) UIViewController *appViewController; // SBAppViewController
+@property (nonatomic, strong) id sceneHandle;
 @property (nonatomic, strong) id scene;             // FBScene
 @property (nonatomic, assign) BOOL hosted;
+@property (nonatomic, assign) BOOL finished;        // gave up on this slot (failed or app died)
 @property (nonatomic, assign) NSInteger reassertCount;
+@property (nonatomic, assign) NSInteger reassertStreak; // consecutive ticks found background
+@property (nonatomic, assign) NSInteger deadStrikes;    // consecutive ticks it looked dead
 @end
 
 @implementation SCPLiveSlot
@@ -149,6 +185,8 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     SCPLivePassthroughWindow *_window;
     NSMutableArray<SCPLiveSlot *> *_slots;
     NSTimer *_keepAliveTimer;
+    SpeedBubbleView *_bubble;
+    NSTimer *_bubbleTimer;
     NSUInteger _generation; // bumps on every start/stop; stale callbacks compare against it
 }
 
@@ -173,6 +211,12 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         SCPLiveLog(@"start: left=%@ %@ right=%@ %@ both=%d", leftID, NSStringFromCGRect(leftFrame),
                     rightID, NSStringFromCGRect(rightFrame), both);
 
+        if (both && leftID.length && [leftID isEqualToString:rightID]) {
+            // Two view controllers on one app's single scene: never do that.
+            SCPLiveLog(@"start: both panes are %@, hosting it once", leftID);
+            both = NO;
+        }
+
         NSMutableArray<NSDictionary *> *wanted = [NSMutableArray new];
         if (leftID.length && leftFrame.size.width > 20 && leftFrame.size.height > 20) {
             [wanted addObject:@{@"id": leftID, @"frame": [NSValue valueWithCGRect:leftFrame]}];
@@ -186,6 +230,11 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
             return;
         }
         SCPSetLiveState(SCPLiveStateStarting);
+
+        // Crash marker: cleared in stop. If SpringBoard dies before that,
+        // the next SpringBoard start finds it (see %ctor).
+        SCPSetPref(@"livePreviewSessionActive", @YES);
+        SCPSetPref(@"livePreviewSessionBoth", @(wanted.count > 1));
 
         [self createWindow];
         if (!_window) {
@@ -209,7 +258,8 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
             [slot.container addSubview:slot.loadingView];
             [_slots addObject:slot];
         }
-        [self addCloseButtonNear:unionFrame];
+        [self addSpeedBubbleWithPrefs:prefs];  // above the panes
+        [self addCloseButtonNear:unionFrame];  // above everything
 
         // Launch one after another; the second launch waits for the first
         // to settle (two cold launches at once is a lot for 2 GB of RAM).
@@ -267,6 +317,20 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     return view;
 }
 
+// Replaces whatever is in the pane with a short message (app died, etc.).
+- (void)showMessage:(NSString *)message inSlot:(SCPLiveSlot *)slot {
+    [slot.loadingView removeFromSuperview];
+    CGSize size = slot.container.bounds.size;
+    UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(12, 0, size.width - 24, size.height)];
+    label.text = message;
+    label.numberOfLines = 0;
+    label.textAlignment = NSTextAlignmentCenter;
+    label.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+    label.font = [UIFont systemFontOfSize:13];
+    [slot.container addSubview:label];
+    slot.loadingView = label;
+}
+
 - (void)addCloseButtonNear:(CGRect)unionFrame {
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
     CGFloat size = 30;
@@ -286,19 +350,110 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     [self stopWithState:SCPLiveStateIdle reason:@"✕ tapped"];
 }
 
+#pragma mark Speed bubble
+
+// Same place and size as the app's own bubble (the app sends its screen
+// center and scaled width). Draggable and pinchable; the final position
+// goes back to the app in stop.
+- (void)addSpeedBubbleWithPrefs:(NSDictionary *)prefs {
+    if (prefs[@"livePreviewBubble"] && ![prefs[@"livePreviewBubble"] boolValue]) return;
+    Class bubbleClass = objc_getClass("SpeedBubbleView");
+    if (!bubbleClass) {
+        SCPLiveLog(@"bubble: SpeedBubbleView class not found");
+        return;
+    }
+    @try {
+        NSInteger style = [prefs[@"bubbleStyle"] integerValue];
+        CGSize natural = SCPLiveBubbleNaturalSize(style);
+        SpeedBubbleView *bubble = [[bubbleClass alloc] initWithFrame:CGRectMake(0, 0, natural.width, natural.height)];
+        bubble.style = style;
+        bubble.showDate = prefs[@"showDate"] ? [prefs[@"showDate"] boolValue] : YES;
+        bubble.showBattery = prefs[@"showBattery"] ? [prefs[@"showBattery"] boolValue] : YES;
+        bubble.showNowPlaying = NO;
+
+        CGFloat width = [prefs[@"livePreviewBubbleWidth"] doubleValue];
+        bubble.scale = width > 0 ? width / natural.width : 1.0;
+
+        CGRect screen = [UIScreen mainScreen].bounds;
+        NSString *centerString = prefs[@"livePreviewBubbleCenter"];
+        CGPoint center = centerString.length ? CGPointFromString(centerString)
+                                             : CGPointMake(CGRectGetMaxX(screen) - natural.width / 2.0 - 16, 140);
+        center.x = MAX(24, MIN(screen.size.width - 24, center.x));
+        center.y = MAX(24, MIN(screen.size.height - 24, center.y));
+        bubble.center = center;
+
+        CGFloat appBaseWidth = [prefs[@"livePreviewBubbleBaseWidth"] doubleValue];
+        bubble.onScaleChanged = ^(CGFloat scale) {
+            // Back to the app bubble's own scale units.
+            if (appBaseWidth > 0) SCPSetPref(@"bubbleScale", @(scale * natural.width / appBaseWidth));
+        };
+
+        if ([UIDevice currentDevice].batteryMonitoringEnabled == NO) {
+            [UIDevice currentDevice].batteryMonitoringEnabled = YES;
+        }
+        [_window.rootViewController.view addSubview:bubble];
+        _bubble = bubble;
+        [self refreshBubble];
+        __weak __typeof__(self) weakSelf = self;
+        _bubbleTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+            __strong __typeof__(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) { [timer invalidate]; return; }
+            [strongSelf refreshBubble];
+        }];
+        SCPLiveLog(@"bubble: style=%ld center=%@ scale=%.2f", (long)style, NSStringFromCGPoint(center), bubble.scale);
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"bubble EXCEPTION %@ -- %@", exception.name, exception.reason);
+        [_bubble removeFromSuperview];
+        _bubble = nil;
+    }
+}
+
+- (void)refreshBubble {
+    if (!_bubble) return;
+    // Newer of the shared file and the notify state, as in Tweak.xm.
+    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kSCPLiveVietmapStatePath];
+    NSDictionary *notifyState = SCPReadSpeedState();
+    if ([notifyState[@"timestamp"] doubleValue] > [state[@"timestamp"] doubleValue]) state = notifyState;
+    @try {
+        [_bubble applyState:state ?: @{}];
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"bubble refresh EXCEPTION %@ -- %@", exception.name, exception.reason);
+    }
+}
+
 #pragma mark Hosting
 
 - (void)hostSlotAtIndex:(NSUInteger)index generation:(NSUInteger)generation {
     if (generation != _generation || index >= _slots.count) return;
     SCPLiveSlot *slot = _slots[index];
-    SCPLiveLog(@"host[%lu] %@: launching suspended", (unsigned long)index, slot.bundleID);
 
+    // Before starting the second app, make sure the first one survived.
+    // If iOS killed it already, RAM is too tight for two.
+    if (index > 0) {
+        SCPLiveSlot *previous = _slots[index - 1];
+        if (previous.hosted && ![self slotLooksAlive:previous]) {
+            SCPLiveLog(@"host[%lu] %@: skipped, %@ is no longer running (low memory?)",
+                        (unsigned long)index, slot.bundleID, previous.bundleID);
+            slot.finished = YES;
+            [self showMessage:@"Không mở app thứ 2: app thứ nhất vừa bị iOS đóng (thiếu RAM)." inSlot:slot];
+            return;
+        }
+    }
+
+    SCPLiveLog(@"host[%lu] %@: launching suspended", (unsigned long)index, slot.bundleID);
     __weak __typeof__(self) weakSelf = self;
-    void (^afterLaunch)(void) = ^{
+    void (^afterLaunch)(NSError *) = ^(NSError *error) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __strong __typeof__(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || generation != strongSelf->_generation) return;
-            [strongSelf attachSlot:slot];
+            if (error) {
+                // Don't wrap a scene for an app that didn't start.
+                slot.finished = YES;
+                [strongSelf showMessage:@"Không khởi động được app này." inSlot:slot];
+                [strongSelf stopIfNothingLeft];
+            } else {
+                [strongSelf attachSlot:slot];
+            }
             if (index + 1 < strongSelf->_slots.count) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [weakSelf hostSlotAtIndex:index + 1 generation:generation];
@@ -312,14 +467,14 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
 // FBSSystemService openApplication:options:withResult: with the
 // "__ActivateSuspended" option (FBSOpenApplicationOptionKeyActivateSuspended):
 // starts the app process without bringing it to the front.
-- (void)launchSuspended:(NSString *)bundleID completion:(void (^)(void))completion {
+- (void)launchSuspended:(NSString *)bundleID completion:(void (^)(NSError *))completion {
     @try {
         Class serviceClass = objc_getClass("FBSSystemService");
         id service = SCPSendId(serviceClass, @"sharedService");
         NSDictionary *options = @{@"__ActivateSuspended": @YES, @"__UnlockDevice": @NO};
         void (^result)(NSError *) = ^(NSError *error) {
             SCPLiveLog(@"  launch %@ result: %@", bundleID, (id)error ?: @"ok");
-            dispatch_async(dispatch_get_main_queue(), completion);
+            dispatch_async(dispatch_get_main_queue(), ^{ completion(error); });
         };
         SEL three = NSSelectorFromString(@"openApplication:options:withResult:");
         SEL four = NSSelectorFromString(@"openApplication:options:clientPort:withResult:");
@@ -331,11 +486,11 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         } else {
             SCPLiveLog(@"  launch: FBSSystemService=%@ service=%@ has no openApplication. Methods:\n%@",
                         serviceClass, service, SCPLiveMethods(serviceClass));
-            completion(); // try to host anyway; works if the app is already running
+            completion(nil); // try to host anyway; works if the app is already running
         }
     } @catch (NSException *exception) {
         SCPLiveLog(@"  launch EXCEPTION %@ -- %@", exception.name, exception.reason);
-        completion();
+        completion(nil);
     }
 }
 
@@ -345,7 +500,12 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         id appController = SCPSendId(objc_getClass("SBApplicationController"), @"sharedInstance");
         id application = SCPSendIdId(appController, @"applicationWithBundleIdentifier:", bundleID);
         SCPLiveLog(@"  attach %@: application=%@", bundleID, application);
-        if (!application) return;
+        if (!application) {
+            slot.finished = YES;
+            [self showMessage:@"Không tìm thấy app này." inSlot:slot];
+            return;
+        }
+        slot.application = application;
 
         Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
         id entity = nil;
@@ -356,6 +516,7 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         if (!entity) {
             SCPLiveLog(@"  attach: ABORT no initWithApplicationForMainDisplay:. SBDeviceApplicationSceneEntity methods:\n%@",
                         SCPLiveMethods(entityClass));
+            slot.finished = YES;
             return;
         }
 
@@ -364,11 +525,15 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         if (![appVCClass instancesRespondToSelector:initSel]) {
             SCPLiveLog(@"  attach: ABORT SBAppViewController has no %@. Methods:\n%@",
                         NSStringFromSelector(initSel), SCPLiveMethods(appVCClass));
+            slot.finished = YES;
             return;
         }
         UIViewController *appVC = ((id (*)(id, SEL, id, id))objc_msgSend)([appVCClass alloc], initSel, bundleID, entity);
         SCPLiveLog(@"  attach %@: appVC=%@", bundleID, appVC);
-        if (!appVC) return;
+        if (!appVC) {
+            slot.finished = YES;
+            return;
+        }
 
         BOOL occl = SCPSendBool(appVC, @"setIgnoresOcclusions:", YES);
         BOOL mode = SCPSendInteger(appVC, @"setRequestedMode:", 2); // 2 = live content (carplay-cast)
@@ -382,6 +547,7 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
 
         id sceneHandle = SCPSendId(appVC, @"sceneHandle");
         id scene = SCPSendId(sceneHandle, @"sceneIfExists") ?: SCPSendId(sceneHandle, @"scene");
+        slot.sceneHandle = sceneHandle;
         slot.scene = scene;
         SCPLiveLog(@"  attach %@: sceneHandle=%@ scene=%@", bundleID, sceneHandle, scene);
         if (!scene) {
@@ -396,6 +562,7 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         // Drop the "Đang mở…" overlay once the hosted view has had time to
         // draw; log the hierarchy so a blank result is diagnosable.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!slot.hosted) return;
             [UIView animateWithDuration:0.2 animations:^{ slot.loadingView.alpha = 0; }];
             SCPLiveLog(@"  attach %@: after 1.5 s content=%@ subviews=%@ sceneForeground=%d",
                         bundleID, NSStringFromCGRect(content.frame), content.subviews,
@@ -403,7 +570,24 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
         });
     } @catch (NSException *exception) {
         SCPLiveLog(@"  attach %@ EXCEPTION %@ -- %@\n%@", slot.bundleID, exception.name, exception.reason, exception.callStackSymbols);
+        slot.finished = YES;
     }
+}
+
+// NO when iOS has killed the app or torn its scene down. Talking to a dead
+// scene is what can trip a FrontBoard assertion and take SpringBoard (and
+// the jailbreak, into safe mode) down with it.
+- (BOOL)slotLooksAlive:(SCPLiveSlot *)slot {
+    id application = slot.application;
+    if (SCPResponds(application, @"isRunning") && !SCPGetBool(application, @"isRunning", YES)) return NO;
+    id processState = SCPSendId(application, @"processState");
+    if (SCPResponds(processState, @"isRunning") && !SCPGetBool(processState, @"isRunning", YES)) return NO;
+    if (SCPResponds(slot.sceneHandle, @"sceneIfExists")) {
+        id current = SCPSendId(slot.sceneHandle, @"sceneIfExists");
+        if (slot.scene && current != slot.scene) return NO; // destroyed or replaced
+    }
+    if (SCPResponds(slot.scene, @"isValid") && !SCPGetBool(slot.scene, @"isValid", YES)) return NO;
+    return YES;
 }
 
 // Tells the app's scene it's foreground (so it renders and takes touches)
@@ -429,38 +613,87 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     }
 }
 
+// Lets go of a slot whose app is gone, without touching its scene again.
+- (void)dropSlot:(SCPLiveSlot *)slot message:(NSString *)message reason:(NSString *)reason {
+    SCPLiveLog(@"  drop %@: %@", slot.bundleID, reason);
+    slot.hosted = NO;
+    slot.finished = YES;
+    [[slot.appViewController view] removeFromSuperview];
+    slot.appViewController = nil;
+    slot.scene = nil;
+    slot.sceneHandle = nil;
+    [self showMessage:message inSlot:slot];
+}
+
+// Ends the session once no slot is running or still on its way.
+- (void)stopIfNothingLeft {
+    for (SCPLiveSlot *slot in _slots) {
+        if (slot.hosted || !slot.finished) return;
+    }
+    [self stopWithState:SCPLiveStateFailed reason:@"no app left running"];
+}
+
 // SpringBoard will try to background the hosted apps (they aren't the
-// frontmost app). Re-assert foreground when that happens.
+// frontmost app). Re-assert foreground when that happens, but only while
+// the app is alive, and stop fighting if SpringBoard keeps refusing.
 - (void)startKeepAlive {
     if (_keepAliveTimer) return;
     __weak __typeof__(self) weakSelf = self;
     _keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
         __strong __typeof__(weakSelf) strongSelf = weakSelf;
         if (!strongSelf) { [timer invalidate]; return; }
-        for (SCPLiveSlot *slot in strongSelf->_slots) {
+        [strongSelf keepAliveTick];
+    }];
+}
+
+- (void)keepAliveTick {
+    @try {
+        for (SCPLiveSlot *slot in [_slots copy]) {
             if (!slot.hosted) continue;
             if (!slot.scene) {
-                id handle = SCPSendId(slot.appViewController, @"sceneHandle");
-                slot.scene = SCPSendId(handle, @"sceneIfExists");
+                slot.scene = SCPSendId(slot.sceneHandle, @"sceneIfExists");
                 if (!slot.scene) continue;
                 SCPLiveLog(@"  keepAlive %@: scene appeared %@", slot.bundleID, slot.scene);
             }
-            BOOL isForeground = SCPGetBool(SCPSendId(slot.scene, @"settings"), @"isForeground", YES);
-            if (!isForeground) {
-                slot.reassertCount++;
-                if (slot.reassertCount <= 5 || slot.reassertCount % 20 == 0) {
-                    SCPLiveLog(@"  keepAlive %@: scene went background, re-asserting (#%ld)", slot.bundleID, (long)slot.reassertCount);
+            if (![self slotLooksAlive:slot]) {
+                // Two ticks in a row, so one odd reading doesn't drop a
+                // working app. Nothing is sent to the scene meanwhile.
+                slot.deadStrikes++;
+                if (slot.deadStrikes >= 2) {
+                    [self dropSlot:slot message:@"App đã bị iOS đóng (có thể do thiếu RAM). Thử chạy 1 app."
+                            reason:@"app or scene gone (low memory?)"];
                 }
-                [strongSelf applyForeground:YES toSlot:slot];
+                continue;
             }
+            slot.deadStrikes = 0;
+            BOOL isForeground = SCPGetBool(SCPSendId(slot.scene, @"settings"), @"isForeground", YES);
+            if (isForeground) {
+                slot.reassertStreak = 0;
+                continue;
+            }
+            slot.reassertCount++;
+            slot.reassertStreak++;
+            if (slot.reassertStreak > 20) { // ~30 s of SpringBoard backgrounding it every time
+                [self dropSlot:slot message:@"iOS không cho app này chạy trong khung."
+                        reason:@"scene keeps going background"];
+                continue;
+            }
+            if (slot.reassertCount <= 5 || slot.reassertCount % 20 == 0) {
+                SCPLiveLog(@"  keepAlive %@: scene went background, re-asserting (#%ld)", slot.bundleID, (long)slot.reassertCount);
+            }
+            [self applyForeground:YES toSlot:slot];
         }
-    }];
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"  keepAlive EXCEPTION %@ -- %@", exception.name, exception.reason);
+    }
+    [self stopIfNothingLeft];
 }
 
 #pragma mark Teardown
 
 - (void)stopWithState:(uint64_t)state reason:(NSString *)reason {
     _generation++;
+    SCPSetPref(@"livePreviewSessionActive", @NO);
     if (!_window && _slots.count == 0) {
         SCPSetLiveState(state);
         return;
@@ -468,16 +701,28 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     SCPLiveLog(@"stop: %@", reason);
     [_keepAliveTimer invalidate];
     _keepAliveTimer = nil;
+    [_bubbleTimer invalidate];
+    _bubbleTimer = nil;
+    if (_bubble) {
+        // Hand the bubble's final spot back to the app's preview.
+        SCPSetPref(@"livePreviewBubbleCenter", NSStringFromCGPoint(_bubble.center));
+        [_bubble removeFromSuperview];
+        _bubble = nil;
+    }
     for (SCPLiveSlot *slot in _slots) {
         @try {
-            if (slot.scene) [self applyForeground:NO toSlot:slot];
-            if (slot.appViewController) SCPSendInteger(slot.appViewController, @"setRequestedMode:", 0);
+            // Only a live app's scene is put back; a dead one is left alone.
+            if (slot.hosted && slot.scene && [self slotLooksAlive:slot]) {
+                [self applyForeground:NO toSlot:slot];
+                SCPSendInteger(slot.appViewController, @"setRequestedMode:", 0);
+            }
         } @catch (NSException *exception) {
             SCPLiveLog(@"  stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
         }
         [[slot.appViewController view] removeFromSuperview];
         slot.appViewController = nil;
         slot.scene = nil;
+        slot.sceneHandle = nil;
     }
     _slots = nil;
     _window.hidden = YES;
@@ -493,6 +738,18 @@ static BOOL SCPGetBool(id target, NSString *selName, BOOL fallback) {
     @autoreleasepool {
         if (![[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"com.apple.springboard"]) return;
         SCPSetLiveState(SCPLiveStateIdle); // a SpringBoard restart ends any session
+
+        // The marker is still set: SpringBoard died during a session.
+        // Don't let the same setup crash it (and drop into safe mode) again.
+        NSDictionary *prefs = SCPCopyPrefs();
+        if ([prefs[@"livePreviewSessionActive"] boolValue]) {
+            BOOL wasBoth = [prefs[@"livePreviewSessionBoth"] boolValue];
+            SCPSetPref(@"livePreviewSessionActive", @NO);
+            if (wasBoth) SCPSetPref(@"livePreviewBoth", @NO);
+            SCPSetPref(@"livePreviewCrashNotice", @(wasBoth ? 2 : 1));
+            SCPLiveLog(@"SpringBoard restarted during a live session (both=%d); %@",
+                        wasBoth, wasBoth ? @"turned \"2 app\" off" : @"will tell the app");
+        }
 
         CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
         CFNotificationCenterAddObserver(darwin, NULL,

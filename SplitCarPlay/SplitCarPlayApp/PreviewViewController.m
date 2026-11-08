@@ -1250,7 +1250,7 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
 
 - (void)edgeHandleTapped {
     _bubbleHiddenLocally = !_bubbleHiddenLocally;
-    _bubble.hidden = _bubbleHiddenLocally;
+    _bubble.hidden = _bubbleHiddenLocally || [self liveIsActive]; // SpringBoard draws it while live
     [self updateEdgeChevron];
 }
 
@@ -1434,6 +1434,17 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     _bubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
     _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
     _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
+    _liveBothSwitch.on = [prefs[@"livePreviewBoth"] boolValue]; // SpringBoard may have turned it off
+
+    // Set by SpringBoard when it restarted in the middle of "Chạy thật"
+    // (LivePreview.xm %ctor). Shown once.
+    NSInteger crashNotice = [prefs[@"livePreviewCrashNotice"] integerValue];
+    if (crashNotice) {
+        SplitCarPlaySetPref(@"livePreviewCrashNotice", @0);
+        _captionLabel.text = crashNotice == 2
+            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode). Đã tự tắt \"2 app\", hãy chạy 1 app. Gửi file splitcarplay_hosting.log để sửa."
+            : @"Lần trước \"Chạy thật\" làm SpringBoard bị lỗi. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+    }
 
     // Newer of the shared file and the notify-state copy (the file may be
     // blocked by Vietmap Live's sandbox) -- same rule as Tweak.xm.
@@ -1486,6 +1497,11 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
         _captionLabel.text = @"Chọn app cho ô 2 trước, hoặc tắt \"2 app\".";
         return;
     }
+    if (_liveBothSwitch.on && [SCPStringPref(prefs, @"leftBundleID") isEqualToString:SCPStringPref(prefs, @"rightBundleID")]) {
+        _captionLabel.text = @"Ô 1 và ô 2 đang là cùng một app. Chọn app khác cho ô 2, hoặc tắt \"2 app\".";
+        [self.view setNeedsLayout];
+        return;
+    }
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
     [self.view layoutIfNeeded];
@@ -1494,6 +1510,13 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([_leftPane convertRect:leftRect toView:nil]));
     SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([_rightPane convertRect:rightRect toView:nil]));
     SCPSetPref(@"livePreviewBoth", @(_liveBothSwitch.on));
+    // The app's bubble ends up under the hosted apps, so SpringBoard draws
+    // its own on top, at this bubble's screen position and size.
+    BOOL showBubble = !_bubbleHiddenLocally && (prefs[@"showSpeedBubble"] ? [prefs[@"showSpeedBubble"] boolValue] : YES);
+    SCPSetPref(@"livePreviewBubble", @(showBubble));
+    SCPSetPref(@"livePreviewBubbleCenter", NSStringFromCGPoint([self.view convertPoint:_bubble.center toView:nil]));
+    SCPSetPref(@"livePreviewBubbleWidth", @(_bubble.bounds.size.width * _bubble.scale));
+    SCPSetPref(@"livePreviewBubbleBaseWidth", @(_bubble.bounds.size.width));
     SCPSetLiveState(SCPLiveStateStarting); // SpringBoard overwrites this; shows feedback right away
     notify_post(SCP_LIVE_START_NOTIFICATION);
     [self updateLiveUI];
@@ -1512,8 +1535,12 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     _liveButton.backgroundColor = state == SCPLiveStateRunning
         ? [UIColor colorWithRed:1.0 green:0.30 blue:0.27 alpha:1]
         : [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
+    BOOL live = state == SCPLiveStateStarting || state == SCPLiveStateRunning;
+    _bubble.hidden = _bubbleHiddenLocally || live; // SpringBoard draws it on top while live
     if (state == _shownLiveState) return;
+    BOOL wasLive = _shownLiveState == SCPLiveStateStarting || _shownLiveState == SCPLiveStateRunning;
     _shownLiveState = state;
+    if (wasLive && !live) [self restoreBubbleFromLive];
     switch (state) {
         case SCPLiveStateStarting:
             _captionLabel.text = @"Đang mở app thật… (tự huỷ sau 12 giây nếu không được)";
@@ -1522,13 +1549,25 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
             _captionLabel.text = @"App đang chạy thật trong khung, bấm vào được. Bấm ✕ đỏ hoặc \"Dừng\" để thoát.";
             break;
         case SCPLiveStateFailed:
-            _captionLabel.text = @"Không mở được app thật. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+            _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
             break;
         default:
             _captionLabel.text = kSCPIdleCaption;
             break;
     }
     [self.view setNeedsLayout];
+}
+
+// SpringBoard writes back where its bubble was dragged or pinched to
+// (LivePreview.xm stop). Move this screen's bubble there.
+- (void)restoreBubbleFromLive {
+    NSDictionary *prefs = SCPCopyPrefs();
+    NSString *centerString = prefs[@"livePreviewBubbleCenter"];
+    if (centerString.length) {
+        _bubble.center = [self.view convertPoint:CGPointFromString(centerString) fromView:nil];
+        _bubbleWasAdjusted = YES; // keep it there instead of re-homing on layout
+    }
+    if (prefs[@"bubbleScale"]) _bubble.scale = [prefs[@"bubbleScale"] doubleValue];
 }
 
 - (void)dealloc {

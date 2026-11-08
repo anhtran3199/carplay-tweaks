@@ -71,6 +71,24 @@ Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
 phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
 with a `[live]` prefix in `splitcarplay_hosting.log`.
 
+The speed bubble is drawn by SpringBoard in the same window, on top of the
+hosted apps (the app's own bubble sits underneath them). It starts where
+the app's bubble was; where you drag or pinch it to goes back to the app.
+
+Crash safety (0.7.1). The first 2-app test crashed SpringBoard, which put
+Dopamine into safe mode. `@try` can't catch FrontBoard assertions, so:
+
+- Before re-asserting foreground, each app is checked for still running
+  and still having the same, valid scene. An app iOS killed (low RAM) is
+  dropped after two dead readings, with a message in its pane, and its
+  scene is never touched again. The second app isn't started if the first
+  already died.
+- A slot that SpringBoard backgrounds again and again for ~30 s is dropped.
+- The same app in both panes is refused (app) and hosted once (SpringBoard).
+- `livePreviewSessionActive` is set at start and cleared at stop. If a
+  SpringBoard start finds it still set, SpringBoard died mid-session: it
+  turns "2 app" off and the app shows a notice once.
+
 ## Testing on the car
 
 1. Install the build from the Sileo repo (respring happens automatically).
