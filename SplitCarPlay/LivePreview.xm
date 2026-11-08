@@ -139,6 +139,32 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
     }
 }
 
+#pragma mark - Never free what SpringBoard may still be using
+
+// Freeing an SBAppViewController aborts SpringBoard (0.7.4 crash report:
+// SIGABRT from an Objective-C exception, right after "freeing view
+// controller"; it likely holds something that has to be invalidated
+// through SpringBoard's own code first). So every view controller and
+// window made here is kept for the life of SpringBoard, and a stopped
+// app's view controller is reused the next time that app is shown.
+static NSMutableArray *SCPLiveKeptObjects(void) {
+    static NSMutableArray *kept;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ kept = [NSMutableArray new]; });
+    return kept;
+}
+
+static NSMutableDictionary<NSString *, UIViewController *> *SCPLiveReusableControllers(void) {
+    static NSMutableDictionary *controllers;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ controllers = [NSMutableDictionary new]; });
+    return controllers;
+}
+
+static void SCPLiveKeepForever(id object) {
+    if (object && ![SCPLiveKeptObjects() containsObject:object]) [SCPLiveKeptObjects() addObject:object];
+}
+
 #pragma mark - Window that only takes touches on its panes
 
 @interface SCPLivePassthroughWindow : UIWindow
@@ -637,40 +663,18 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         }
         slot.application = application;
 
-        Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
-        SCPLiveLog(@"  attach %@: creating scene entity", bundleID);
-        id entity = nil;
-        if ([entityClass instancesRespondToSelector:NSSelectorFromString(@"initWithApplicationForMainDisplay:")]) {
-            entity = ((id (*)(id, SEL, id))objc_msgSend)([entityClass alloc], NSSelectorFromString(@"initWithApplicationForMainDisplay:"), application);
-        }
-        SCPLiveLog(@"  attach %@: entity=%@", bundleID, entity);
-        if (!entity) {
-            SCPLiveLog(@"  attach: ABORT no initWithApplicationForMainDisplay:. SBDeviceApplicationSceneEntity methods:\n%@",
-                        SCPLiveMethods(entityClass));
-            slot.finished = YES;
-            return;
-        }
-
         Class appVCClass = objc_getClass("SBAppViewController");
-        SEL initSel = NSSelectorFromString(@"initWithIdentifier:andApplicationSceneEntity:");
-        if (![appVCClass instancesRespondToSelector:initSel]) {
-            SCPLiveLog(@"  attach: ABORT SBAppViewController has no %@. Methods:\n%@",
-                        NSStringFromSelector(initSel), SCPLiveMethods(appVCClass));
-            slot.finished = YES;
-            return;
-        }
-        // A fresh identifier every time. The view controller registers a
-        // presenter on the app's scene under this name, and the previous
-        // session's one may still be registered: reusing the name (it used
-        // to be the bundle ID) crashed SpringBoard on the second start.
-        static NSUInteger presenterCounter = 0;
-        NSString *identifier = [NSString stringWithFormat:@"SplitCarPlayLive-%@-%lu", bundleID, (unsigned long)++presenterCounter];
-        SCPLiveLog(@"  attach %@: creating SBAppViewController %@", bundleID, identifier);
-        UIViewController *appVC = ((id (*)(id, SEL, id, id))objc_msgSend)([appVCClass alloc], initSel, identifier, entity);
-        SCPLiveLog(@"  attach %@: appVC=%@", bundleID, appVC);
-        if (!appVC) {
-            slot.finished = YES;
-            return;
+        UIViewController *appVC = SCPLiveReusableControllers()[bundleID];
+        if (appVC) {
+            SCPLiveLog(@"  attach %@: reusing %@", bundleID, appVC);
+        } else {
+            appVC = [self makeAppViewControllerForSlot:slot application:application];
+            if (!appVC) {
+                slot.finished = YES;
+                return;
+            }
+            SCPLiveKeepForever(appVC);
+            SCPLiveReusableControllers()[bundleID] = appVC;
         }
 
         SCPLiveLog(@"  attach %@: setting live mode", bundleID);
@@ -679,7 +683,8 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         SCPLiveLog(@"  attach %@: setIgnoresOcclusions=%d setRequestedMode=%d", bundleID, occl, mode);
 
         UIView *content = appVC.view;
-        [slot.container insertSubview:content belowSubview:slot.loadingView];
+        content.hidden = NO;
+        [slot.container insertSubview:content belowSubview:slot.loadingView]; // moves it out of an old session's window
         slot.appViewController = appVC;
         [self layoutContentOfSlot:slot]; // phone-sized, scaled down to the pane
 
@@ -709,6 +714,47 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
     } @catch (NSException *exception) {
         SCPLiveLog(@"  attach %@ EXCEPTION %@ -- %@\n%@", slot.bundleID, exception.name, exception.reason, exception.callStackSymbols);
         slot.finished = YES;
+    }
+}
+
+// New SBAppViewController for the app's main-display scene; nil on failure.
+- (UIViewController *)makeAppViewControllerForSlot:(SCPLiveSlot *)slot application:(id)application {
+    NSString *bundleID = slot.bundleID;
+    {
+        Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
+        SCPLiveLog(@"  attach %@: creating scene entity", bundleID);
+        id entity = nil;
+        if ([entityClass instancesRespondToSelector:NSSelectorFromString(@"initWithApplicationForMainDisplay:")]) {
+            entity = ((id (*)(id, SEL, id))objc_msgSend)([entityClass alloc], NSSelectorFromString(@"initWithApplicationForMainDisplay:"), application);
+        }
+        SCPLiveLog(@"  attach %@: entity=%@", bundleID, entity);
+        if (!entity) {
+            SCPLiveLog(@"  attach: ABORT no initWithApplicationForMainDisplay:. SBDeviceApplicationSceneEntity methods:\n%@",
+                        SCPLiveMethods(entityClass));
+            return nil;
+        }
+
+        Class appVCClass = objc_getClass("SBAppViewController");
+        SEL initSel = NSSelectorFromString(@"initWithIdentifier:andApplicationSceneEntity:");
+        if (![appVCClass instancesRespondToSelector:initSel]) {
+            SCPLiveLog(@"  attach: ABORT SBAppViewController has no %@. Methods:\n%@",
+                        NSStringFromSelector(initSel), SCPLiveMethods(appVCClass));
+            return nil;
+        }
+        // A fresh identifier every time. The view controller registers a
+        // presenter on the app's scene under this name, and the previous
+        // session's one may still be registered: reusing the name (it used
+        // to be the bundle ID) crashed SpringBoard on the second start.
+        static NSUInteger presenterCounter = 0;
+        NSString *identifier = [NSString stringWithFormat:@"SplitCarPlayLive-%@-%lu", bundleID, (unsigned long)++presenterCounter];
+        SCPLiveLog(@"  attach %@: creating SBAppViewController %@", bundleID, identifier);
+        UIViewController *appVC = ((id (*)(id, SEL, id, id))objc_msgSend)([appVCClass alloc], initSel, identifier, entity);
+        SCPLiveLog(@"  attach %@: appVC=%@", bundleID, appVC);
+        if (!appVC) {
+            return nil;
+        }
+
+        return appVC;
     }
 }
 
@@ -756,7 +802,12 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
     SCPLiveLog(@"  drop %@: %@", slot.bundleID, reason);
     slot.hosted = NO;
     slot.finished = YES;
-    [[slot.appViewController view] removeFromSuperview];
+    [slot.appViewController view].hidden = YES;
+    // Next time this app gets a fresh view controller; this one stays alive
+    // (SCPLiveKeptObjects), because freeing it aborts SpringBoard.
+    if (SCPLiveReusableControllers()[slot.bundleID] == slot.appViewController) {
+        [SCPLiveReusableControllers() removeObjectForKey:slot.bundleID];
+    }
     slot.appViewController = nil;
     slot.scene = nil;
     slot.sceneHandle = nil;
@@ -875,17 +926,21 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 - (void)releaseSlots:(NSArray<SCPLiveSlot *> *)slots index:(NSUInteger)index window:(UIWindow *)window state:(uint64_t)state {
     if (index >= slots.count) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            // Nothing is freed: the view controllers stay (reused next
+            // time) and so does the hidden window holding their views.
+            SCPLiveKeepForever(window);
             for (SCPLiveSlot *slot in slots) {
-                SCPLiveLog(@"  stop %@: freeing view controller", slot.bundleID);
-                [[slot.appViewController view] removeFromSuperview];
-                slot.appViewController = nil;
+                slot.appViewController = nil; // still held by SCPLiveKeptObjects
                 slot.scene = nil;
                 slot.sceneHandle = nil;
             }
-            [window.rootViewController.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
             self->_tearingDown = NO;
-            SCPSetPref(@"livePreviewSessionActive", @NO); // only now: a crash while closing still counts
-            SCPLiveLog(@"stop: done");
+            SCPLiveLog(@"stop: done (kept %lu objects for reuse)", (unsigned long)SCPLiveKeptObjects().count);
+            // Clear the crash marker a bit later, so a crash right after
+            // closing (as in 0.7.4) is still noticed on the next start.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (!self->_window && !self->_tearingDown) SCPSetPref(@"livePreviewSessionActive", @NO);
+            });
             if (self->_pendingStart) {
                 self->_pendingStart = NO;
                 [self start];

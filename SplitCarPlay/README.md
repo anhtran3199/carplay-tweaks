@@ -73,6 +73,15 @@ Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
 phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
 with a `[live]` prefix in `splitcarplay_hosting.log`.
 
+Never freeing (0.7.7). The SpringBoard crash report for a ✕ in 0.7.4
+(SIGABRT, uncaught Objective-C exception) came right after the log's
+"freeing view controller": releasing an `SBAppViewController` aborts
+SpringBoard. Every view controller and live window is now kept for the
+life of SpringBoard (`SCPLiveKeptObjects`), and a stopped app's view
+controller is reused the next time that app is shown. An app that iOS
+killed gets a new one next time; its old one is hidden, still not freed.
+The crash marker is cleared 3 s after closing finishes.
+
 Restarting (0.7.4). After a clean ✕, the next start crashed SpringBoard.
 `SBAppViewController initWithIdentifier:` was given the bundle ID, so the
 second session registered a scene presenter under the same name as the
