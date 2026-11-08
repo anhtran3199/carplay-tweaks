@@ -190,6 +190,10 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
     SpeedBubbleView *_bubble;
     NSTimer *_bubbleTimer;
     UIButton *_closeButton;
+    UIImageView *_edgeChevron;  // on the bubble show/hide handle
+    BOOL _tearingDown;          // stop is letting the apps go, step by step
+    BOOL _pendingStart;         // START arrived during teardown; run it after
+
     NSUInteger _generation; // bumps on every start/stop; stale callbacks compare against it
 }
 
@@ -201,7 +205,17 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
 }
 
 - (void)start {
-    if (_window) [self stopWithState:SCPLiveStateIdle reason:@"restart"];
+    if (_tearingDown) {
+        SCPLiveLog(@"start: previous session still closing, starting after it");
+        _pendingStart = YES;
+        return;
+    }
+    if (_window) {
+        // Close the running session gently first; start again when done.
+        _pendingStart = YES;
+        [self stopWithState:SCPLiveStateIdle reason:@"restart"];
+        return;
+    }
     NSUInteger generation = ++_generation;
 
     @try {
@@ -263,6 +277,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
             [_slots addObject:slot];
         }
         [self addSpeedBubbleWithPrefs:prefs];  // above the panes
+        [self addEdgeHandleWithPrefs:prefs];   // the app's own handle is covered too
         [self addCloseButtonNear:unionFrame];  // above everything
 
         // Launch one after another; the second launch waits for the first
@@ -451,6 +466,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         center.x = MAX(24, MIN(screen.size.width - 24, center.x));
         center.y = MAX(24, MIN(screen.size.height - 24, center.y));
         bubble.center = center;
+        bubble.hidden = [prefs[@"livePreviewBubbleHidden"] boolValue]; // hidden with the edge handle in the app
 
         CGFloat appBaseWidth = [prefs[@"livePreviewBubbleBaseWidth"] doubleValue];
         bubble.onScaleChanged = ^(CGFloat scale) {
@@ -476,6 +492,50 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         [_bubble removeFromSuperview];
         _bubble = nil;
     }
+}
+
+// Copy of the app's left-edge half-capsule (shows/hides the bubble), at the
+// same screen spot: the app's one is under the hosted apps now.
+- (void)addEdgeHandleWithPrefs:(NSDictionary *)prefs {
+    if (!_bubble) return;
+    CGRect frame = CGRectFromString(prefs[@"livePreviewEdgeFrame"] ?: @"");
+    if (frame.size.width < 4 || frame.size.height < 4) return;
+    UIButton *handle = [UIButton buttonWithType:UIButtonTypeCustom];
+    handle.frame = frame;
+    handle.accessibilityLabel = @"Ẩn/hiện thẻ tốc độ";
+    [handle addTarget:self action:@selector(edgeHandleTapped) forControlEvents:UIControlEventTouchUpInside];
+
+    CGFloat visualW = MAX(10, frame.size.width - 10); // the app adds 10 pt of extra touch area
+    UIView *visual = [[UIView alloc] initWithFrame:CGRectMake(0, 0, visualW, frame.size.height)];
+    visual.userInteractionEnabled = NO;
+    visual.backgroundColor = [UIColor whiteColor];
+    visual.layer.cornerRadius = 8;
+    visual.layer.maskedCorners = kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner;
+    visual.layer.borderWidth = 1.0 / MAX(1.0, [UIScreen mainScreen].scale);
+    visual.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+    visual.layer.shadowColor = [UIColor blackColor].CGColor;
+    visual.layer.shadowOpacity = 0.12;
+    visual.layer.shadowRadius = 3;
+    visual.layer.shadowOffset = CGSizeMake(1, 1);
+    [handle addSubview:visual];
+
+    _edgeChevron = [[UIImageView alloc] initWithFrame:CGRectMake(floor((visualW - 9) / 2.0), floor((frame.size.height - 12) / 2.0), 9, 12)];
+    _edgeChevron.contentMode = UIViewContentModeScaleAspectFit;
+    _edgeChevron.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
+    [visual addSubview:_edgeChevron];
+    [self updateEdgeChevron];
+    [_window.rootViewController.view addSubview:handle];
+}
+
+- (void)updateEdgeChevron {
+    NSString *name = _bubble.hidden ? @"chevron.right" : @"chevron.left";
+    UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:10 weight:UIImageSymbolWeightSemibold];
+    _edgeChevron.image = [[UIImage systemImageNamed:name withConfiguration:config] imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
+
+- (void)edgeHandleTapped {
+    _bubble.hidden = !_bubble.hidden;
+    [self updateEdgeChevron];
 }
 
 - (void)refreshBubble {
@@ -696,6 +756,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 
 // Ends the session once no slot is running or still on its way.
 - (void)stopIfNothingLeft {
+    if (!_window || _slots.count == 0) return; // already stopped
     for (SCPLiveSlot *slot in _slots) {
         if (slot.hosted || !slot.finished) return;
     }
@@ -760,44 +821,102 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 
 #pragma mark Teardown
 
+// Closing used to let every app go at once: background the scene, drop
+// the live mode and free the view controller in the same instant. With two
+// apps that crashed SpringBoard (0.7.2, ✕ tapped). Now the window hides
+// right away, then one app at a time: live mode off, wait, background the
+// scene only if it's still foreground, wait, next app; the view
+// controllers are freed a second after the last one. Every step is logged
+// BEFORE it runs, so after a crash the log's last line names the step.
 - (void)stopWithState:(uint64_t)state reason:(NSString *)reason {
     _generation++;
-    SCPSetPref(@"livePreviewSessionActive", @NO);
+    if (_tearingDown) {
+        SCPLiveLog(@"stop: already closing (%@)", reason);
+        return;
+    }
     if (!_window && _slots.count == 0) {
+        SCPSetPref(@"livePreviewSessionActive", @NO);
         SCPSetLiveState(state);
         return;
     }
     SCPLiveLog(@"stop: %@", reason);
+    _tearingDown = YES;
     [_keepAliveTimer invalidate];
     _keepAliveTimer = nil;
     [_bubbleTimer invalidate];
     _bubbleTimer = nil;
     if (_bubble) {
-        // Hand the bubble's final spot back to the app's preview.
+        // Hand the bubble's final spot and visibility back to the app.
         SCPSetPref(@"livePreviewBubbleCenter", NSStringFromCGPoint(_bubble.center));
-        [_bubble removeFromSuperview];
+        SCPSetPref(@"livePreviewBubbleHidden", @(_bubble.hidden));
         _bubble = nil;
     }
-    for (SCPLiveSlot *slot in _slots) {
+    _edgeChevron = nil;
+    _closeButton = nil;
+
+    NSArray<SCPLiveSlot *> *slots = [_slots copy] ?: @[];
+    _slots = nil;
+    UIWindow *window = _window;
+    _window = nil;
+    window.hidden = YES; // looks closed now; the views inside stay until each app is let go
+    SCPSetLiveState(state); // the app's UI can move on; a new START waits for _tearingDown
+    [self releaseSlots:slots index:0 window:window state:state];
+}
+
+- (void)releaseSlots:(NSArray<SCPLiveSlot *> *)slots index:(NSUInteger)index window:(UIWindow *)window state:(uint64_t)state {
+    if (index >= slots.count) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            for (SCPLiveSlot *slot in slots) {
+                SCPLiveLog(@"  stop %@: freeing view controller", slot.bundleID);
+                [[slot.appViewController view] removeFromSuperview];
+                slot.appViewController = nil;
+                slot.scene = nil;
+                slot.sceneHandle = nil;
+            }
+            [window.rootViewController.view.subviews makeObjectsPerformSelector:@selector(removeFromSuperview)];
+            self->_tearingDown = NO;
+            SCPSetPref(@"livePreviewSessionActive", @NO); // only now: a crash while closing still counts
+            SCPLiveLog(@"stop: done");
+            if (self->_pendingStart) {
+                self->_pendingStart = NO;
+                [self start];
+            }
+        });
+        return;
+    }
+
+    SCPLiveSlot *slot = slots[index];
+    BOOL alive = NO;
+    @try {
+        alive = slot.hosted && slot.appViewController && [self slotLooksAlive:slot];
+        if (alive) {
+            SCPLiveLog(@"  stop %@: setRequestedMode:0", slot.bundleID);
+            SCPSendInteger(slot.appViewController, @"setRequestedMode:", 0);
+            SCPLiveLog(@"  stop %@: setRequestedMode:0 done", slot.bundleID);
+        } else {
+            SCPLiveLog(@"  stop %@: not running, nothing to put back", slot.bundleID);
+        }
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"  stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
+    }
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.1) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
-            // Only a live app's scene is put back; a dead one is left alone.
-            if (slot.hosted && slot.scene && [self slotLooksAlive:slot]) {
-                [self applyForeground:NO toSlot:slot];
-                SCPSendInteger(slot.appViewController, @"setRequestedMode:", 0);
+            if (alive && slot.scene && [self slotLooksAlive:slot]) {
+                BOOL foreground = SCPGetBool(SCPSendId(slot.scene, @"settings"), @"isForeground", NO);
+                if (foreground) {
+                    SCPLiveLog(@"  stop %@: scene still foreground, backgrounding", slot.bundleID);
+                    [self applyForeground:NO toSlot:slot];
+                    SCPLiveLog(@"  stop %@: backgrounded", slot.bundleID);
+                }
             }
         } @catch (NSException *exception) {
             SCPLiveLog(@"  stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
         }
-        [[slot.appViewController view] removeFromSuperview];
-        slot.appViewController = nil;
-        slot.scene = nil;
-        slot.sceneHandle = nil;
-    }
-    _slots = nil;
-    _closeButton = nil;
-    _window.hidden = YES;
-    _window = nil;
-    SCPSetLiveState(state);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self releaseSlots:slots index:index + 1 window:window state:state];
+        });
+    });
 }
 
 @end

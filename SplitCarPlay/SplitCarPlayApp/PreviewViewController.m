@@ -1523,8 +1523,11 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     SCPSetPref(@"livePreviewBoth", @(_liveBothSwitch.on));
     // The app's bubble ends up under the hosted apps, so SpringBoard draws
     // its own on top, at this bubble's screen position and size.
-    BOOL showBubble = !_bubbleHiddenLocally && (prefs[@"showSpeedBubble"] ? [prefs[@"showSpeedBubble"] boolValue] : YES);
+    // Same for the left-edge show/hide handle, which the hosted apps cover.
+    BOOL showBubble = prefs[@"showSpeedBubble"] ? [prefs[@"showSpeedBubble"] boolValue] : YES;
     SCPSetPref(@"livePreviewBubble", @(showBubble));
+    SCPSetPref(@"livePreviewBubbleHidden", @(_bubbleHiddenLocally));
+    SCPSetPref(@"livePreviewEdgeFrame", NSStringFromCGRect([self.view convertRect:_edgeHandle.frame toView:nil]));
     SCPSetPref(@"livePreviewBubbleCenter", NSStringFromCGPoint([self.view convertPoint:_bubble.center toView:nil]));
     SCPSetPref(@"livePreviewBubbleWidth", @(_bubble.bounds.size.width * _bubble.scale));
     SCPSetPref(@"livePreviewBubbleBaseWidth", @(_bubble.bounds.size.width));
@@ -1579,6 +1582,12 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
         _bubbleWasAdjusted = YES; // keep it there instead of re-homing on layout
     }
     if (prefs[@"bubbleScale"]) _bubble.scale = [prefs[@"bubbleScale"] doubleValue];
+    // Shown/hidden with SpringBoard's copy of the edge handle while live.
+    if (prefs[@"livePreviewBubbleHidden"]) {
+        _bubbleHiddenLocally = [prefs[@"livePreviewBubbleHidden"] boolValue];
+        _bubble.hidden = _bubbleHiddenLocally;
+        [self updateEdgeChevron];
+    }
 }
 
 - (void)dealloc {

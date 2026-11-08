@@ -71,6 +71,16 @@ Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
 phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
 with a `[live]` prefix in `splitcarplay_hosting.log`.
 
+Closing (0.7.3). Tapping ✕ with two apps crashed SpringBoard in 0.7.2,
+which let every app go in the same instant. Now the window hides at once
+and the apps are released one at a time: `setRequestedMode:0`, wait,
+background the scene only if it's still foreground, wait, next app; the
+view controllers are freed a second after the last one. Each step is
+logged before it runs (`stop <bundle id>: …`), so after a crash the last
+`[live]` line names the step. The crash marker is cleared only when
+closing is done. SpringBoard also draws its own copy of the app's
+left-edge show/hide handle for the bubble, which the hosted apps cover.
+
 Sizing (0.7.2). Each app is told it has a phone-width screen with the
 pane's aspect ratio (scene `setFrame:`), and its view is scaled down to
 the pane, so the whole app shows instead of its top-left corner. Dragging
