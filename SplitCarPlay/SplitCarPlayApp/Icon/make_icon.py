@@ -1,11 +1,13 @@
 """Draws the SplitCarPlay app icon and writes every size the app needs.
 
 Blue-to-indigo background, a wide white car screen split in two (left
-pane solid, right pane lighter) and an orange speed bubble on its corner.
+pane solid, right pane lighter) and an orange speed bubble (a
+white speedometer, no number) on its corner.
 iOS rounds the corners itself, so the image is a full square.
 
     python make_icon.py            # writes into ../Resources
 """
+import math
 import os
 import sys
 
@@ -51,10 +53,13 @@ def draw_icon():
     cx, cy, r = 774, 724, 160
     d.ellipse((cx - r - 16, cy - r - 16, cx + r + 16, cy + r + 16), fill=(255, 255, 255, 255))
     d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=(255, 149, 0, 255))
-    f = font(150)
-    text = '60'
-    box = d.textbbox((0, 0), text, font=f)
-    d.text((cx - (box[2] - box[0]) / 2 - box[0], cy - (box[3] - box[1]) / 2 - box[1]), text, font=f, fill=(255, 255, 255, 255))
+    # Speedometer: white arc with a needle (no number)
+    ar = 100
+    d.arc((cx - ar, cy - ar + 20, cx + ar, cy + ar + 20), start=150, end=390, fill=(255, 255, 255, 255), width=26)
+    angle = math.radians(-50)
+    nx, ny = cx + 78 * math.cos(angle), cy + 20 + 78 * math.sin(angle)
+    d.line((cx, cy + 20, nx, ny), fill=(255, 255, 255, 255), width=24)
+    d.ellipse((cx - 26, cy - 6, cx + 26, cy + 46), fill=(255, 255, 255, 255))
 
     img = img.convert('RGBA')
     img.alpha_composite(layer)
