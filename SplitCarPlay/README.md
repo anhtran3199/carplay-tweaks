@@ -71,6 +71,14 @@ Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
 phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
 with a `[live]` prefix in `splitcarplay_hosting.log`.
 
+Sizing (0.7.2). Each app is told it has a phone-width screen with the
+pane's aspect ratio (scene `setFrame:`), and its view is scaled down to
+the pane, so the whole app shows instead of its top-left corner. Dragging
+the ≡ divider while live no longer stops the session: the app posts the new
+pane geometry in `SCP_LIVE_RESIZE_NOTIFICATION`'s state on every move;
+SpringBoard moves/rescales the views live and resizes the scenes when the
+drag ends.
+
 The speed bubble is drawn by SpringBoard in the same window, on top of the
 hosted apps (the app's own bubble sits underneath them). It starts where
 the app's bubble was; where you drag or pinch it to goes back to the app.

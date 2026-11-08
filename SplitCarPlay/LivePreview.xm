@@ -163,6 +163,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
 @property (nonatomic, strong) UIViewController *appViewController; // SBAppViewController
 @property (nonatomic, strong) id sceneHandle;
 @property (nonatomic, strong) id scene;             // FBScene
+@property (nonatomic, assign) BOOL isRight;         // which pane: follows that pane on divider drags
 @property (nonatomic, assign) BOOL hosted;
 @property (nonatomic, assign) BOOL finished;        // gave up on this slot (failed or app died)
 @property (nonatomic, assign) NSInteger reassertCount;
@@ -179,6 +180,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
 + (instancetype)sharedInstance;
 - (void)start;
 - (void)stopWithState:(uint64_t)state reason:(NSString *)reason;
+- (void)applyResizeFromApp;
 @end
 
 @implementation SCPLivePreviewController {
@@ -187,6 +189,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
     NSTimer *_keepAliveTimer;
     SpeedBubbleView *_bubble;
     NSTimer *_bubbleTimer;
+    UIButton *_closeButton;
     NSUInteger _generation; // bumps on every start/stop; stale callbacks compare against it
 }
 
@@ -219,10 +222,10 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
 
         NSMutableArray<NSDictionary *> *wanted = [NSMutableArray new];
         if (leftID.length && leftFrame.size.width > 20 && leftFrame.size.height > 20) {
-            [wanted addObject:@{@"id": leftID, @"frame": [NSValue valueWithCGRect:leftFrame]}];
+            [wanted addObject:@{@"id": leftID, @"frame": [NSValue valueWithCGRect:leftFrame], @"right": @NO}];
         }
         if (both && rightID.length && rightFrame.size.width > 20 && rightFrame.size.height > 20) {
-            [wanted addObject:@{@"id": rightID, @"frame": [NSValue valueWithCGRect:rightFrame]}];
+            [wanted addObject:@{@"id": rightID, @"frame": [NSValue valueWithCGRect:rightFrame], @"right": @YES}];
         }
         if (wanted.count == 0) {
             SCPLiveLog(@"start: ABORT nothing to host (no app picked or bad frames)");
@@ -249,6 +252,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
             unionFrame = CGRectUnion(unionFrame, frame);
             SCPLiveSlot *slot = [SCPLiveSlot new];
             slot.bundleID = item[@"id"];
+            slot.isRight = [item[@"right"] boolValue];
             slot.container = [[UIView alloc] initWithFrame:frame];
             slot.container.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
             slot.container.layer.cornerRadius = 10;
@@ -327,6 +331,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
     label.textAlignment = NSTextAlignmentCenter;
     label.textColor = [UIColor colorWithWhite:0.85 alpha:1];
     label.font = [UIFont systemFontOfSize:13];
+    label.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [slot.container addSubview:label];
     slot.loadingView = label;
 }
@@ -335,6 +340,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
     UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeCustom];
     CGFloat size = 30;
     closeButton.frame = CGRectMake(CGRectGetMaxX(unionFrame) - size - 6, CGRectGetMinY(unionFrame) + 6, size, size);
+    _closeButton = closeButton;
     closeButton.backgroundColor = [UIColor colorWithRed:1.0 green:0.30 blue:0.27 alpha:0.95];
     closeButton.layer.cornerRadius = size / 2.0;
     closeButton.layer.borderWidth = 1.5;
@@ -348,6 +354,70 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
 
 - (void)closeTapped {
     [self stopWithState:SCPLiveStateIdle reason:@"✕ tapped"];
+}
+
+#pragma mark Sizing
+
+// The size the app is told it has: phone width, pane aspect ratio. The
+// app lays out like on a phone and the result is scaled down to fit the
+// pane, so the whole app is visible instead of its top-left corner.
+static CGSize SCPLiveVirtualSize(CGSize pane) {
+    CGRect screen = [UIScreen mainScreen].bounds;
+    CGFloat phoneWidth = MIN(screen.size.width, screen.size.height);
+    CGFloat width = MAX(pane.width, phoneWidth);
+    CGFloat height = pane.width > 0 ? pane.height * width / pane.width : screen.size.height;
+    return CGSizeMake(width, height);
+}
+
+- (void)layoutContentOfSlot:(SCPLiveSlot *)slot {
+    UIView *content = slot.appViewController.view;
+    if (!content) return;
+    CGSize pane = slot.container.bounds.size;
+    CGSize virtualSize = SCPLiveVirtualSize(pane);
+    CGFloat scale = virtualSize.width > 0 ? pane.width / virtualSize.width : 1.0;
+    content.autoresizingMask = UIViewAutoresizingNone;
+    content.transform = CGAffineTransformIdentity;
+    content.bounds = CGRectMake(0, 0, virtualSize.width, virtualSize.height);
+    content.center = CGPointMake(pane.width / 2.0, pane.height / 2.0);
+    content.transform = CGAffineTransformMakeScale(scale, scale);
+}
+
+- (void)positionCloseButton {
+    CGRect unionFrame = CGRectNull;
+    for (SCPLiveSlot *slot in _slots) unionFrame = CGRectUnion(unionFrame, slot.container.frame);
+    if (CGRectIsNull(unionFrame) || !_closeButton) return;
+    CGFloat size = _closeButton.bounds.size.width;
+    _closeButton.frame = CGRectMake(CGRectGetMaxX(unionFrame) - size - 6, CGRectGetMinY(unionFrame) + 6, size, size);
+}
+
+// The divider in the app was dragged (SCP_LIVE_RESIZE_NOTIFICATION).
+// During the drag only the scaled views follow (cheap); when it ends the
+// apps' scenes get the new size too, so they re-layout for it.
+- (void)applyResizeFromApp {
+    double leftWidth = 0, rightX = 0, rightWidth = 0;
+    BOOL final = NO;
+    if (!_window || !SCPReadLiveResize(&leftWidth, &rightX, &rightWidth, &final)) return;
+    @try {
+        for (SCPLiveSlot *slot in _slots) {
+            CGRect frame = slot.container.frame;
+            if (slot.isRight) {
+                frame.origin.x = rightX;
+                frame.size.width = rightWidth;
+            } else {
+                frame.size.width = leftWidth;
+            }
+            if (frame.size.width < 20) continue;
+            slot.container.frame = frame;
+            [self layoutContentOfSlot:slot];
+            if (final && slot.hosted && slot.scene && [self slotLooksAlive:slot]) {
+                [self applyForeground:YES toSlot:slot];
+            }
+        }
+        [self positionCloseButton];
+        if (final) SCPLiveLog(@"resize: left w=%.1f right x=%.1f w=%.1f", leftWidth, rightX, rightWidth);
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"resize EXCEPTION %@ -- %@", exception.name, exception.reason);
+    }
 }
 
 #pragma mark Speed bubble
@@ -540,10 +610,9 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
         SCPLiveLog(@"  attach %@: setIgnoresOcclusions=%d setRequestedMode=%d", bundleID, occl, mode);
 
         UIView *content = appVC.view;
-        content.frame = slot.container.bounds;
-        content.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
         [slot.container insertSubview:content belowSubview:slot.loadingView];
         slot.appViewController = appVC;
+        [self layoutContentOfSlot:slot]; // phone-sized, scaled down to the pane
 
         id sceneHandle = SCPSendId(appVC, @"sceneHandle");
         id scene = SCPSendId(sceneHandle, @"sceneIfExists") ?: SCPSendId(sceneHandle, @"scene");
@@ -564,8 +633,8 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!slot.hosted) return;
             [UIView animateWithDuration:0.2 animations:^{ slot.loadingView.alpha = 0; }];
-            SCPLiveLog(@"  attach %@: after 1.5 s content=%@ subviews=%@ sceneForeground=%d",
-                        bundleID, NSStringFromCGRect(content.frame), content.subviews,
+            SCPLiveLog(@"  attach %@: after 1.5 s content bounds=%@ scale=%.2f subviews=%@ sceneForeground=%d",
+                        bundleID, NSStringFromCGRect(content.bounds), content.transform.a, content.subviews,
                         SCPGetBool(SCPSendId(slot.scene, @"settings"), @"isForeground", NO));
         });
     } @catch (NSException *exception) {
@@ -601,10 +670,10 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
         SCPLiveLog(@"  applyForeground: scene %@ has no updateSettingsWithBlock:. Methods:\n%@", [scene class], SCPLiveMethods([scene class]));
         return;
     }
-    CGRect frame = foreground ? slot.container.bounds : [UIScreen mainScreen].bounds;
+    CGSize size = foreground ? SCPLiveVirtualSize(slot.container.bounds.size) : [UIScreen mainScreen].bounds.size;
     void (^block)(id) = ^(id settings) {
         SCPSendBool(settings, @"setForeground:", foreground);
-        SCPSendRect(settings, @"setFrame:", CGRectMake(0, 0, frame.size.width, frame.size.height));
+        SCPSendRect(settings, @"setFrame:", CGRectMake(0, 0, size.width, size.height));
     };
     @try {
         ((void (*)(id, SEL, id))objc_msgSend)(scene, updateSel, block);
@@ -725,6 +794,7 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
         slot.sceneHandle = nil;
     }
     _slots = nil;
+    _closeButton = nil;
     _window.hidden = YES;
     _window = nil;
     SCPSetLiveState(state);
@@ -766,6 +836,12 @@ static CGSize SCPLiveBubbleNaturalSize(NSInteger style) {
                 });
             },
             CFSTR(SCP_LIVE_STOP_NOTIFICATION), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(darwin, NULL,
+            (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                        const void *object, CFDictionaryRef userInfo) {
+                dispatch_async(dispatch_get_main_queue(), ^{ [[SCPLivePreviewController sharedInstance] applyResizeFromApp]; });
+            },
+            CFSTR(SCP_LIVE_RESIZE_NOTIFICATION), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
         // Never draw over the lock screen.
         CFNotificationCenterAddObserver(darwin, NULL,
             (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,

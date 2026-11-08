@@ -184,3 +184,38 @@ static inline uint64_t SCPGetLiveState(void) {
     notify_get_state(token, &state);
     return state;
 }
+
+// Divider dragged while live: the app sends the panes' new horizontal
+// geometry (y and height don't change) in the notify state, so SpringBoard
+// can follow every frame without prefs round trips. Layout, in 0.5 pt units:
+//   bits  0-15  left pane width
+//   bits 16-31  right pane x
+//   bits 32-47  right pane width
+//   bit  63     final (drag ended: also resize the apps' scenes)
+#define SCP_LIVE_RESIZE_NOTIFICATION "com.example.splitcarplay/live-preview-resize"
+
+static inline void SCPPostLiveResize(double leftWidth, double rightX, double rightWidth, BOOL final) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_LIVE_RESIZE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return;
+    uint64_t lw = (uint64_t)llround(MAX(0.0, MIN(32767.0, leftWidth)) * 2.0) & 0xFFFF;
+    uint64_t rx = (uint64_t)llround(MAX(0.0, MIN(32767.0, rightX)) * 2.0) & 0xFFFF;
+    uint64_t rw = (uint64_t)llround(MAX(0.0, MIN(32767.0, rightWidth)) * 2.0) & 0xFFFF;
+    notify_set_state(token, lw | (rx << 16) | (rw << 32) | ((uint64_t)(final ? 1 : 0) << 63));
+    notify_post(SCP_LIVE_RESIZE_NOTIFICATION);
+}
+
+static inline BOOL SCPReadLiveResize(double *leftWidth, double *rightX, double *rightWidth, BOOL *final) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_LIVE_RESIZE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return NO;
+    uint64_t packed = 0;
+    if (notify_get_state(token, &packed) != NOTIFY_STATUS_OK || packed == 0) return NO;
+    *leftWidth = (double)(packed & 0xFFFF) / 2.0;
+    *rightX = (double)((packed >> 16) & 0xFFFF) / 2.0;
+    *rightWidth = (double)((packed >> 32) & 0xFFFF) / 2.0;
+    *final = ((packed >> 63) & 1) != 0;
+    return YES;
+}

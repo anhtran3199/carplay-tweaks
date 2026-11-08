@@ -1115,13 +1115,19 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     if (usableWidth <= 0) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _dragStartRatio = _splitRatio > 0 ? _splitRatio : 0.5;
-        [self stopLiveIfRunning]; // the hosted windows wouldn't follow the new split
     }
     CGFloat deltaRatio = [gesture translationInView:self.view].x / usableWidth;
     _splitRatio = MAX(0.2, MIN(0.8, _dragStartRatio + deltaRatio));
     [self.view setNeedsLayout];
     [self.view layoutIfNeeded];
-    if (gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled) {
+    BOOL ended = gesture.state == UIGestureRecognizerStateEnded || gesture.state == UIGestureRecognizerStateCancelled;
+    if ([self liveIsActive]) {
+        // The real apps follow the panes (LivePreview.xm applyResizeFromApp).
+        CGRect leftRect = [self liveContentRectOfPane:_leftPane];
+        CGRect rightRect = [self liveContentRectOfPane:_rightPane];
+        SCPPostLiveResize(leftRect.size.width, rightRect.origin.x, rightRect.size.width, ended);
+    }
+    if (ended) {
         // Persist only once the drag finishes -- matches the slider's
         // own behavior and avoids writing the plist on every pixel.
         SplitCarPlaySetPref(@"splitRatio", @(_splitRatio));
@@ -1479,6 +1485,13 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     [self stopLiveIfRunning];
 }
 
+// A pane's content area (below its title bar) in screen points. This app
+// is full screen, so window coordinates are screen coordinates.
+- (CGRect)liveContentRectOfPane:(UIView *)pane {
+    CGRect rect = CGRectMake(0, kSCPPaneBarHeight, pane.bounds.size.width, pane.bounds.size.height - kSCPPaneBarHeight);
+    return [pane convertRect:rect toView:nil];
+}
+
 - (void)liveBothChanged:(UISwitch *)sender {
     SplitCarPlaySetPref(@"livePreviewBoth", @(sender.on));
 }
@@ -1505,10 +1518,8 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
     [self.view layoutIfNeeded];
-    CGRect leftRect = CGRectMake(0, kSCPPaneBarHeight, _leftPane.bounds.size.width, _leftPane.bounds.size.height - kSCPPaneBarHeight);
-    CGRect rightRect = CGRectMake(0, kSCPPaneBarHeight, _rightPane.bounds.size.width, _rightPane.bounds.size.height - kSCPPaneBarHeight);
-    SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([_leftPane convertRect:leftRect toView:nil]));
-    SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([_rightPane convertRect:rightRect toView:nil]));
+    SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([self liveContentRectOfPane:_leftPane]));
+    SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([self liveContentRectOfPane:_rightPane]));
     SCPSetPref(@"livePreviewBoth", @(_liveBothSwitch.on));
     // The app's bubble ends up under the hosted apps, so SpringBoard draws
     // its own on top, at this bubble's screen position and size.
@@ -1546,7 +1557,7 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
             _captionLabel.text = @"Đang mở app thật… (tự huỷ sau 12 giây nếu không được)";
             break;
         case SCPLiveStateRunning:
-            _captionLabel.text = @"App đang chạy thật trong khung, bấm vào được. Bấm ✕ đỏ hoặc \"Dừng\" để thoát.";
+            _captionLabel.text = @"App đang chạy thật trong khung, bấm vào được. Kéo thanh ≡ để đổi cỡ 2 khung. Bấm ✕ đỏ hoặc \"Dừng\" để thoát.";
             break;
         case SCPLiveStateFailed:
             _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
