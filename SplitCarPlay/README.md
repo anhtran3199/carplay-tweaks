@@ -53,6 +53,24 @@ build can use the right one. The app may also need to be launched first.
 - The first reload after SpringBoard starts is deferred 3 s, so nothing
   runs before SpringBoard has finished launching.
 
+## Live preview on the phone ("Chạy thật", 0.7.0, experimental)
+
+App → Mô phỏng → **▶ Chạy thật** runs the picked app(s) for real inside the
+preview panes, on the phone screen. Switch on "2 app" for both panes
+(start with one: two live apps is a lot for 2 GB of RAM).
+
+`LivePreview.xm` (SpringBoard only) launches each app suspended
+(`FBSSystemService`), wraps its main-display scene in an
+`SBAppViewController` (`SBDeviceApplicationSceneEntity
+initWithApplicationForMainDisplay:`), puts it in a window over the pane
+and keeps the scene foreground and pane-sized. It's the same hosting
+problem as CarPlay, testable without a car; once it works, Tweak.xm's
+CarPlay path should reuse it.
+
+Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
+phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
+with a `[live]` prefix in `splitcarplay_hosting.log`.
+
 ## Testing on the car
 
 1. Install the build from the Sileo repo (respring happens automatically).
