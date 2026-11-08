@@ -118,7 +118,9 @@ static UIImage *SplitCarPlayLoadKTXImage(NSString *path) {
     // OpenGL). Without this flip, every KTX snapshot renders upside down.
     CGAffineTransform flip = CGAffineTransformMake(1, 0, 0, -1, 0, ciImage.extent.size.height);
     ciImage = [ciImage imageByApplyingTransform:flip];
-    CIContext *context = [CIContext context];
+    static CIContext *context; // creating one per image was the slow part
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ context = [CIContext context]; });
     CGImageRef cgImage = [context createCGImage:ciImage fromRect:ciImage.extent];
     if (!cgImage) return nil;
     UIImage *image = [UIImage imageWithCGImage:cgImage];
@@ -144,6 +146,40 @@ static UIImage *SplitCarPlayAppSnapshot(NSString *bundleID) {
         return nil;
     }
     return nil;
+}
+
+// Snapshot decode (container scan + KTX via Metal/CoreImage) takes long
+// enough to stall the UI, so it runs in the background; results are kept
+// small (the panes are ~170 pt wide) and cached per app.
+static void SplitCarPlayLoadSnapshotAsync(NSString *bundleID, void (^done)(UIImage *image)) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_queue_t queue;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        cache = [NSCache new];
+        queue = dispatch_queue_create("com.example.splitcarplay.snapshot", DISPATCH_QUEUE_SERIAL);
+    });
+    if (bundleID.length == 0) return;
+    UIImage *cached = [cache objectForKey:bundleID];
+    if (cached) {
+        done(cached);
+        return;
+    }
+    dispatch_async(queue, ^{
+        UIImage *full = SplitCarPlayAppSnapshot(bundleID);
+        UIImage *small = nil;
+        if (full.size.width > 0) {
+            CGFloat width = MIN(full.size.width, 360);
+            CGSize size = CGSizeMake(width, floor(full.size.height * width / full.size.width));
+            UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+            format.scale = 2;
+            small = [[[UIGraphicsImageRenderer alloc] initWithSize:size format:format] imageWithActions:^(UIGraphicsImageRendererContext *context) {
+                [full drawInRect:CGRectMake(0, 0, size.width, size.height)];
+            }];
+            [cache setObject:small forKey:bundleID];
+        }
+        dispatch_async(dispatch_get_main_queue(), ^{ if (small) done(small); });
+    });
 }
 
 typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
@@ -604,7 +640,7 @@ static NSString * const kSCPVietmapBundleID = @"vn.vietmap.live";
 
 static const CGFloat kSCPPaneBarHeight = 34;
 static const CGFloat kSCPPaneCircleSize = 18;
-static const CGFloat kSCPPaneButtonSlot = 24; // tap target per circle button; the visible circle is kSCPPaneCircleSize
+static const CGFloat kSCPPaneButtonSlot = 32; // tap target per circle button (taps 6 pt around it count too); the visible circle is kSCPPaneCircleSize
 static const CGFloat kSCPPaneGap = 6;         // gap between the two panes (the divider pill sits over it)
 static const CGFloat kSCPCarFramePad = 6;     // outer car-screen frame around both panes
 
@@ -616,6 +652,12 @@ static const CGFloat kSCPCarFramePad = 6;     // outer car-screen frame around b
 @end
 
 @implementation SCPCircleButton
+// The bar is only 34 pt tall: accept taps a little outside the frame so
+// the target is ~44 pt.
+- (BOOL)pointInside:(CGPoint)point withEvent:(UIEvent *)event {
+    return CGRectContainsPoint(CGRectInset(self.bounds, -6, -6), point);
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     CGFloat s = kSCPPaneCircleSize;
@@ -930,6 +972,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     BOOL _visible;          // between viewDidAppear and viewWillDisappear
     BOOL _autoStartPending; // a restart is coming, so a stop isn't the user's ✕
     BOOL _singleThisVisit;  // SpringBoard crashed with 2 apps last time: run ô 1 only
+    BOOL _forceLiveRestart; // next refresh stops the live apps even if nothing changed
+    NSString *_liveConfigKey; // apps + split mode the live session was started with
     uint64_t _shownLiveState;
 
     // Looked up once per refresh (display-name lookup walks every
@@ -1019,6 +1063,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
     _captionLabel.text = nil; // only used for errors and warnings
+    _captionLabel.userInteractionEnabled = YES;
+    [_captionLabel addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(captionTapped)]];
     [self.view addSubview:_captionLabel];
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidEnterBackground)
@@ -1171,8 +1217,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _carScreenFrame.frame = CGRectInset(CGRectUnion(_leftPane.frame, _rightPane.frame), -kSCPCarFramePad, -kSCPCarFramePad);
     _carScreenFrame.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_carScreenFrame.bounds cornerRadius:16].CGPath;
 
-    // Divider: 28x80 invisible hit area centered on the gap, white pill inside.
-    CGFloat hitW = 28, hitH = 80;
+    // Divider: 44x80 invisible hit area centered on the gap, pill inside.
+    CGFloat hitW = 44, hitH = 80;
     CGFloat boundaryX = CGRectGetMaxX(_leftPane.frame) + kSCPPaneGap / 2.0;
     _dividerHandle.frame = CGRectMake(boundaryX - hitW / 2.0, paneTop + floor((carH - hitH) / 2.0), hitW, hitH);
     _dividerPill.frame = CGRectMake((hitW - 10) / 2.0, (hitH - 56) / 2.0, 10, 56);
@@ -1180,7 +1226,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
     // Edge handle hugs the car frame's left edge, just under the title bars.
     CGFloat edgeVisualW = 14, edgeH = 84;
-    _edgeHandle.frame = CGRectMake(CGRectGetMinX(_carScreenFrame.frame), paneTop + kSCPPaneBarHeight + 14, edgeVisualW + 10, edgeH);
+    _edgeHandle.frame = CGRectMake(CGRectGetMinX(_carScreenFrame.frame), paneTop + kSCPPaneBarHeight + 14, 44, edgeH); // 44 pt target, 14 pt visual
     _edgeVisual.frame = CGRectMake(0, 0, edgeVisualW, edgeH);
     _edgeChevron.frame = CGRectMake(floor((edgeVisualW - 9) / 2.0), floor((edgeH - 12) / 2.0), 9, 12);
 
@@ -1220,7 +1266,10 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (void)paneContentTapped:(UITapGestureRecognizer *)gesture { [self showAppPickerForLeftSide:(gesture.view.tag == 1)]; }
 
 // Green: re-read the snapshot (e.g. after opening that app once).
-- (void)paneReloadTapped:(UIButton *)sender { [self refresh]; }
+- (void)paneReloadTapped:(UIButton *)sender {
+    _forceLiveRestart = YES; // ↻ means "reopen", even with the same apps
+    [self refresh];
+}
 
 // Yellow: swap the two panes' apps.
 - (void)paneSwapTapped:(UIButton *)sender {
@@ -1364,15 +1413,22 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (void)configurePane:(PreviewPaneView *)pane bundleID:(NSString *)bundleID names:(NSDictionary *)names icons:(NSDictionary *)icons {
     BOOL empty = bundleID.length == 0;
     if (empty) {
+        pane.accessibilityIdentifier = nil;
         [pane showEmpty];
     } else {
         // Prefer a real cached app-switcher snapshot (looks like the actual
         // app) over the icon tile -- see this file's header comment. Either
         // can be nil (app never backgrounded yet, wrong path guess, decode
         // failure) with no crash either way.
-        [pane showAppNamed:(names[bundleID] ?: bundleID)
-                      icon:icons[bundleID]
-                  snapshot:SplitCarPlayAppSnapshot(bundleID)];
+        NSString *name = names[bundleID] ?: bundleID;
+        UIImage *icon = icons[bundleID];
+        pane.accessibilityIdentifier = bundleID;
+        [pane showAppNamed:name icon:icon snapshot:nil]; // icon tile now, snapshot when decoded
+        __weak PreviewPaneView *weakPane = pane;
+        SplitCarPlayLoadSnapshotAsync(bundleID, ^(UIImage *image) {
+            if (![weakPane.accessibilityIdentifier isEqualToString:bundleID]) return; // picked another app meanwhile
+            [weakPane showAppNamed:name icon:icon snapshot:image];
+        });
     }
 
     UIColor *offFill = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.30 : 0.85) alpha:1]; }];
@@ -1389,9 +1445,22 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     pane.emptyStateBuiltSize = CGSizeZero; // recents may have changed -- rebuild on next layout
 }
 
+// Which apps a live session would show, as a comparable string.
+- (NSString *)liveConfigKeyWithPrefs:(NSDictionary *)prefs {
+    NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
+    NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
+    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID] && !_singleThisVisit;
+    return [NSString stringWithFormat:@"%@|%@", leftID, both ? rightID : @""];
+}
+
 - (void)refresh {
-    [self stopLiveIfRunning]; // the picked apps or panes may be changing
     NSDictionary *prefs = SCPCopyPrefs();
+    // Restarting the live apps costs SpringBoard a few seconds; only do it
+    // when the apps changed (or ↻ asked for it), not on every refresh.
+    if ([self liveIsActive] && (_forceLiveRestart || ![[self liveConfigKeyWithPrefs:prefs] isEqualToString:_liveConfigKey])) {
+        [self stopLiveIfRunning];
+    }
+    _forceLiveRestart = NO;
     NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
 
@@ -1433,8 +1502,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         SplitCarPlaySetPref(@"livePreviewCrashNotice", @0);
         if (crashNotice == 2) _singleThisVisit = YES;
         _captionLabel.text = crashNotice == 2
-            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode), nên lần này chỉ chạy app ô 1. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa."
-            : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode), nên lần này chỉ chạy app ô 1. Chạm vào đây để gửi log."
+            : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Chạm vào đây để gửi log.";
     }
 
     // Newer of the shared file and the notify-state copy (the file may be
@@ -1457,6 +1526,20 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 }
 
 #pragma mark - "Chạy thật" (LivePreview.xm in SpringBoard)
+
+// Error captions end with "Chạm vào đây để gửi log": share a copy of it.
+- (void)captionTapped {
+    if ([_captionLabel.text rangeOfString:@"gửi log"].location == NSNotFound) return;
+    NSData *data = [NSData dataWithContentsOfFile:@"/var/mobile/Library/Logs/splitcarplay_hosting.log"];
+    if (data.length == 0) return;
+    NSString *copyPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splitcarplay_hosting.log"];
+    [data writeToFile:copyPath atomically:YES];
+    UIActivityViewController *sheet = [[UIActivityViewController alloc] initWithActivityItems:@[[NSURL fileURLWithPath:copyPath]]
+                                                                        applicationActivities:nil];
+    sheet.popoverPresentationController.sourceView = _captionLabel;
+    sheet.popoverPresentationController.sourceRect = _captionLabel.bounds;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
 
 - (BOOL)liveIsActive {
     uint64_t state = SCPGetLiveState();
@@ -1505,6 +1588,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
     if (leftID.length == 0) return;
     BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID] && !_singleThisVisit;
+    _liveConfigKey = [self liveConfigKeyWithPrefs:prefs];
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
     [self.view layoutIfNeeded];
@@ -1542,7 +1626,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
             _captionLabel.text = nil;
             break;
         case SCPLiveStateFailed:
-            _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+            _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Chạm vào đây để gửi log.";
             break;
         default:
             // Closed with ✕ while on screen: say how to get it back.

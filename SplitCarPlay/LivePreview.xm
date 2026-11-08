@@ -612,7 +612,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
     handle.accessibilityLabel = @"Ẩn/hiện thẻ tốc độ";
     [handle addTarget:self action:@selector(edgeHandleTapped) forControlEvents:UIControlEventTouchUpInside];
 
-    CGFloat visualW = MAX(10, frame.size.width - 10); // the app adds 10 pt of extra touch area
+    CGFloat visualW = 14; // the app's handle is 14 pt wide inside a 44 pt touch area
     UIView *visual = [[UIView alloc] initWithFrame:CGRectMake(0, 0, visualW, frame.size.height)];
     visual.userInteractionEnabled = NO;
     visual.backgroundColor = [UIColor whiteColor];
