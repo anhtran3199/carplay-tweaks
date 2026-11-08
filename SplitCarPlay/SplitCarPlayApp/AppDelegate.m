@@ -21,6 +21,135 @@
 @interface AccountViewController : UIViewController
 @end
 
+#pragma mark - Floating tab bar
+
+// The reference screenshots' tab bar floats: a white rounded bar inset from
+// the screen edges with a soft shadow, and the selected tab sits on a light
+// blue pill. Done with the stock UITabBar (no custom tab bar view): after
+// UIKit lays it out, its frame is pulled in from the sides (and lifted a
+// little on home-button phones), the bar's own layer draws the rounded
+// background + shadow, and the pill is the selection-indicator image.
+static const CGFloat kSCPTabBarSideInset = 12;
+static const CGFloat kSCPTabBarBottomGap = 6; // only on phones without a home indicator
+static const CGFloat kSCPTabBarCornerRadius = 20;
+
+@interface SCPFloatingTabBarController : UITabBarController
+@end
+
+@implementation SCPFloatingTabBarController {
+    CGSize _indicatorSize;
+    CGFloat _appliedBottomGap;
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    UITabBar *bar = self.tabBar;
+    bar.tintColor = [UIColor systemBlueColor];
+    bar.unselectedItemTintColor = [UIColor colorWithWhite:0.55 alpha:1];
+    bar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.97];
+    bar.layer.cornerRadius = kSCPTabBarCornerRadius;
+    bar.layer.masksToBounds = NO;
+    bar.layer.borderWidth = 1.0 / MAX(1.0, [UIScreen mainScreen].scale);
+    bar.layer.borderColor = [UIColor colorWithWhite:0.88 alpha:1].CGColor;
+    bar.layer.shadowColor = [UIColor blackColor].CGColor;
+    bar.layer.shadowOpacity = 0.10;
+    bar.layer.shadowRadius = 12;
+    bar.layer.shadowOffset = CGSizeMake(0, 4);
+    _appliedBottomGap = -1;
+    [self applyAppearanceWithIndicator:nil];
+}
+
+- (void)applyAppearanceWithIndicator:(UIImage *)indicator {
+    UIColor *selectedColor = [UIColor systemBlueColor];
+    UIColor *normalColor = [UIColor colorWithWhite:0.55 alpha:1];
+    if (@available(iOS 13.0, *)) {
+        // Transparent bar background: the bar's own (rounded) layer
+        // background shows through instead of UIKit's square one.
+        UITabBarAppearance *appearance = [[UITabBarAppearance alloc] init];
+        [appearance configureWithTransparentBackground];
+        appearance.backgroundColor = [UIColor clearColor];
+        appearance.shadowColor = [UIColor clearColor];
+        appearance.selectionIndicatorImage = indicator;
+        NSDictionary *normalText = @{
+            NSForegroundColorAttributeName: normalColor,
+            NSFontAttributeName: [UIFont systemFontOfSize:10 weight:UIFontWeightMedium],
+        };
+        NSDictionary *selectedText = @{
+            NSForegroundColorAttributeName: selectedColor,
+            NSFontAttributeName: [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold],
+        };
+        NSArray<UITabBarItemAppearance *> *itemAppearances = @[
+            appearance.stackedLayoutAppearance,
+            appearance.inlineLayoutAppearance,
+            appearance.compactInlineLayoutAppearance,
+        ];
+        for (UITabBarItemAppearance *itemAppearance in itemAppearances) {
+            itemAppearance.normal.iconColor = normalColor;
+            itemAppearance.normal.titleTextAttributes = normalText;
+            itemAppearance.selected.iconColor = selectedColor;
+            itemAppearance.selected.titleTextAttributes = selectedText;
+        }
+        self.tabBar.standardAppearance = appearance;
+        if (@available(iOS 15.0, *)) {
+            self.tabBar.scrollEdgeAppearance = appearance;
+        }
+    } else {
+        self.tabBar.backgroundImage = [UIImage new];
+        self.tabBar.shadowImage = [UIImage new];
+        self.tabBar.selectionIndicatorImage = indicator;
+    }
+}
+
+// Light-blue rounded pill, sized to exactly one tab item so it doesn't
+// matter whether UIKit draws the indicator at its natural size or
+// stretches it to the item.
+- (UIImage *)indicatorImageOfSize:(CGSize)size {
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        CGRect pill = CGRectInset(CGRectMake(0, 0, size.width, size.height), 8, 4);
+        [[UIColor colorWithRed:0.88 green:0.93 blue:1.0 alpha:1] setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:pill cornerRadius:14] fill];
+    }];
+}
+
+- (void)viewDidLayoutSubviews {
+    [super viewDidLayoutSubviews];
+    UITabBar *bar = self.tabBar;
+    CGRect viewBounds = self.view.bounds;
+    CGFloat bottomSafe = self.view.safeAreaInsets.bottom;
+    CGFloat gap = bottomSafe > 0 ? 0 : kSCPTabBarBottomGap;
+
+    // Keep UIKit's height (49pt + home-indicator area); only inset the
+    // sides and lift by `gap`.
+    CGRect frame = bar.frame;
+    frame.origin.x = kSCPTabBarSideInset;
+    frame.size.width = MAX(0, viewBounds.size.width - kSCPTabBarSideInset * 2);
+    frame.origin.y = viewBounds.size.height - frame.size.height - gap;
+    if (!CGRectEqualToRect(bar.frame, frame)) bar.frame = frame;
+    bar.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:bar.bounds cornerRadius:kSCPTabBarCornerRadius].CGPath;
+
+    // Children already get a bottom safe-area inset for the bar's height;
+    // add the lift so nothing ends up hidden behind the floating bar.
+    if (_appliedBottomGap != gap) {
+        _appliedBottomGap = gap;
+        for (UIViewController *child in self.viewControllers) {
+            UIEdgeInsets insets = child.additionalSafeAreaInsets;
+            insets.bottom = gap;
+            child.additionalSafeAreaInsets = insets;
+        }
+    }
+
+    NSUInteger count = MAX((NSUInteger)1, self.viewControllers.count);
+    CGFloat itemHeight = MAX(1, MIN(49, frame.size.height - bottomSafe));
+    CGSize itemSize = CGSizeMake(MAX(1, floor(frame.size.width / count)), itemHeight);
+    if (!CGSizeEqualToSize(itemSize, _indicatorSize)) {
+        _indicatorSize = itemSize;
+        [self applyAppearanceWithIndicator:[self indicatorImageOfSize:itemSize]];
+    }
+}
+
+@end
+
 @implementation AppDelegate
 
 - (UIViewController *)tabWithRoot:(UIViewController *)root title:(NSString *)title systemImage:(NSString *)imageName {
@@ -37,7 +166,7 @@
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions {
     self.window = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
 
-    UITabBarController *tabBar = [[UITabBarController alloc] init];
+    UITabBarController *tabBar = [[SCPFloatingTabBarController alloc] init];
     tabBar.viewControllers = @[
         [self tabWithRoot:[[HomeViewController alloc] init] title:@"Trang chủ" systemImage:@"house.fill"],
         [self tabWithRoot:[[OnCarViewController alloc] init] title:@"Trên xe" systemImage:@"car.fill"],

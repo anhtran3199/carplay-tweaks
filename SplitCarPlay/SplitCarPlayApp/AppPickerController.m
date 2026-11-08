@@ -133,6 +133,10 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 
 #pragma mark - Grid picker (modal)
 
+// Presented over the current screen as a floating white card (faint dim
+// behind it) rather than a full-screen sheet -- matches the reference
+// "Chọn app ô 1/2" screenshots. Tap the dim area or ✕ to dismiss.
+
 @interface AppPickerController : UIViewController
 @property (nonatomic, copy) void (^onPick)(NSString *bundleID);
 @property (nonatomic, copy) NSString *pickerTitle;
@@ -140,7 +144,12 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 @end
 
 @implementation AppPickerController {
+    UIView *_backdrop;
+    UIView *_card;
+    UILabel *_titleLabel;
+    UIButton *_closeButton;
     UIScrollView *_scroll;
+    CGFloat _gridWidth; // width the grid was last built for; rebuilt only when it changes
 }
 
 + (void)presentFrom:(UIViewController *)presenter title:(NSString *)title onPick:(void (^)(NSString *bundleID))onPick {
@@ -154,64 +163,80 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+    self.view.backgroundColor = [UIColor clearColor];
+    CGFloat hairline = 1.0 / MAX(1.0, [UIScreen mainScreen].scale);
 
-    UITapGestureRecognizer *dimTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)];
-    [self.view addGestureRecognizer:dimTap];
+    // Separate backdrop view (behind the card) owns the dismiss tap, so
+    // taps on the card never need to be filtered out.
+    _backdrop = [[UIView alloc] init];
+    _backdrop.backgroundColor = [UIColor colorWithWhite:0 alpha:0.12];
+    [_backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)]];
+    [self.view addSubview:_backdrop];
 
-    // White card with a thin light-gray border -- matches the reference
-    // screenshot's "Chọn app ô 1/2" look (light theme, not the dark
-    // sheet this used to be).
-    UIView *card = [[UIView alloc] init];
-    card.backgroundColor = [UIColor whiteColor];
-    card.layer.cornerRadius = 14;
-    card.layer.masksToBounds = YES;
-    card.layer.borderWidth = 1;
-    card.layer.borderColor = [UIColor colorWithWhite:0.85 alpha:1].CGColor;
-    card.tag = 9001;
-    [self.view addSubview:card];
-    // Eat taps on the card itself so they don't fall through to the dim
-    // background's close gesture.
-    [card addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(doNothing)]];
+    // No masksToBounds so the soft shadow shows; the scroll view inside
+    // is inset from the rounded corners and clips its own content.
+    _card = [[UIView alloc] init];
+    _card.backgroundColor = [UIColor whiteColor];
+    _card.layer.cornerRadius = 16;
+    _card.layer.borderWidth = hairline;
+    _card.layer.borderColor = [UIColor colorWithWhite:0.84 alpha:1].CGColor;
+    _card.layer.shadowColor = [UIColor blackColor].CGColor;
+    _card.layer.shadowOpacity = 0.14;
+    _card.layer.shadowRadius = 18;
+    _card.layer.shadowOffset = CGSizeMake(0, 6);
+    [self.view addSubview:_card];
 
-    UILabel *titleLabel = [[UILabel alloc] init];
-    titleLabel.text = self.pickerTitle;
-    titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    titleLabel.textColor = [UIColor blackColor];
-    titleLabel.tag = 9002;
-    [card addSubview:titleLabel];
+    _titleLabel = [[UILabel alloc] init];
+    _titleLabel.text = self.pickerTitle;
+    _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
+    _titleLabel.textColor = [UIColor colorWithWhite:0.1 alpha:1];
+    [_card addSubview:_titleLabel];
 
-    UIButton *closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [closeButton setTitle:@"✕" forState:UIControlStateNormal];
-    closeButton.tintColor = [UIColor colorWithWhite:0.5 alpha:1];
-    closeButton.tag = 9003;
-    [closeButton addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
-    [card addSubview:closeButton];
+    _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImage *xmark = nil;
+    if (@available(iOS 13.0, *)) {
+        xmark = [UIImage systemImageNamed:@"xmark"
+                        withConfiguration:[UIImageSymbolConfiguration configurationWithPointSize:14 weight:UIImageSymbolWeightSemibold]];
+    }
+    if (xmark) {
+        [_closeButton setImage:xmark forState:UIControlStateNormal];
+    } else {
+        [_closeButton setTitle:@"✕" forState:UIControlStateNormal];
+    }
+    _closeButton.tintColor = [UIColor colorWithWhite:0.45 alpha:1];
+    _closeButton.accessibilityLabel = @"Đóng";
+    [_closeButton addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
+    [_card addSubview:_closeButton];
 
     _scroll = [[UIScrollView alloc] init];
-    [card addSubview:_scroll];
-
-    [self populateGrid];
-}
-
-- (void)doNothing {
+    _scroll.alwaysBounceVertical = YES;
+    _scroll.clipsToBounds = YES;
+    [_card addSubview:_scroll];
 }
 
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
-    UIView *card = [self.view viewWithTag:9001];
-    CGRect cardFrame = CGRectMake(16, self.view.safeAreaInsets.top + 40,
-                                   self.view.bounds.size.width - 32,
-                                   self.view.bounds.size.height * 0.62);
-    card.frame = cardFrame;
+    CGRect bounds = self.view.bounds;
+    _backdrop.frame = bounds;
 
-    UILabel *titleLabel = (UILabel *)[card viewWithTag:9002];
-    titleLabel.frame = CGRectMake(16, 14, cardFrame.size.width - 60, 24);
+    CGFloat top = self.view.safeAreaInsets.top + 70;
+    CGFloat height = MIN(bounds.size.height * 0.60, bounds.size.height - top - self.view.safeAreaInsets.bottom - 16);
+    height = MAX(height, 200);
+    CGRect cardFrame = CGRectMake(16, top, bounds.size.width - 32, height);
+    _card.frame = cardFrame;
+    _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:16].CGPath;
 
-    UIButton *closeButton = (UIButton *)[card viewWithTag:9003];
-    closeButton.frame = CGRectMake(cardFrame.size.width - 44, 6, 36, 36);
+    _titleLabel.frame = CGRectMake(18, 14, cardFrame.size.width - 18 - 52, 24);
+    _closeButton.frame = CGRectMake(cardFrame.size.width - 46, 8, 36, 36);
 
-    _scroll.frame = CGRectMake(0, 48, cardFrame.size.width, cardFrame.size.height - 48);
+    // Stops 10pt short of the card's bottom so its square corners stay
+    // inside the card's rounded ones.
+    _scroll.frame = CGRectMake(0, 50, cardFrame.size.width, MAX(0, cardFrame.size.height - 50 - 10));
+
+    if (_scroll.bounds.size.width > 0 && _scroll.bounds.size.width != _gridWidth) {
+        _gridWidth = _scroll.bounds.size.width;
+        [self populateGrid];
+    }
 }
 
 - (void)close {
@@ -219,52 +244,60 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 }
 
 - (void)populateGrid {
-    for (UIView *subview in _scroll.subviews) [subview removeFromSuperview];
-    [self.view setNeedsLayout];
-    [self.view layoutIfNeeded]; // need _scroll's real width before laying out the grid below
+    for (UIView *subview in [_scroll.subviews copy]) {
+        if ([subview isKindOfClass:[UIButton class]] || [subview isKindOfClass:[UILabel class]]) [subview removeFromSuperview];
+    }
 
-    CGFloat y = 8;
+    CGFloat y = 4;
     NSArray<NSString *> *recent = SplitCarPlayRecentBundleIDs();
     if (recent.count > 0) {
         y = [self addSection:@"GẦN ĐÂY" bundleIDs:recent startY:y];
     }
     y = [self addSection:@"TẤT CẢ" bundleIDs:SplitCarPlayUserInstalledBundleIDsSorted() startY:y];
-    _scroll.contentSize = CGSizeMake(_scroll.bounds.size.width, y + 12);
+    _scroll.contentSize = CGSizeMake(_scroll.bounds.size.width, y + 8);
 }
 
 - (CGFloat)addSection:(NSString *)title bundleIDs:(NSArray<NSString *> *)bundleIDs startY:(CGFloat)y {
-    UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(12, y, _scroll.bounds.size.width - 24, 18)];
-    header.text = title;
-    header.font = [UIFont systemFontOfSize:11 weight:UIFontWeightSemibold];
-    header.textColor = [UIColor colorWithWhite:0.55 alpha:1];
+    // ~5 columns on a 375pt-wide phone (343pt card).
+    CGFloat sidePad = 14, iconSize = 56, labelH = 14, rowGap = 12;
+    CGFloat contentW = MAX(1, _scroll.bounds.size.width - sidePad * 2);
+    NSInteger columns = MAX((NSInteger)1, (NSInteger)floor(contentW / 62.0));
+    CGFloat itemWidth = floor(contentW / columns);
+    CGFloat itemHeight = iconSize + 4 + labelH;
+
+    UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(sidePad + floor((itemWidth - iconSize) / 2.0), y,
+                                                                _scroll.bounds.size.width - sidePad * 2, 18)];
+    header.attributedText = [[NSAttributedString alloc] initWithString:title attributes:@{
+        NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold],
+        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.55 alpha:1],
+        NSKernAttributeName: @1.2,
+    }];
     [_scroll addSubview:header];
     y += 26;
-
-    CGFloat itemWidth = 72, itemIconSize = 60, padding = 4;
-    NSInteger columns = MAX(1, (NSInteger)(_scroll.bounds.size.width / itemWidth));
-    CGFloat sideInset = (_scroll.bounds.size.width - columns * itemWidth) / 2.0;
 
     NSInteger col = 0;
     CGFloat rowY = y;
     for (NSString *bundleID in bundleIDs) {
-        CGFloat x = sideInset + col * itemWidth;
+        CGFloat x = sidePad + col * itemWidth;
+        NSString *name = SplitCarPlayDisplayNameForBundleID(bundleID);
         UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-        button.frame = CGRectMake(x, rowY, itemWidth, itemIconSize + 26);
+        button.frame = CGRectMake(x, rowY, itemWidth, itemHeight);
         button.accessibilityIdentifier = bundleID;
+        button.accessibilityLabel = name;
         [button addTarget:self action:@selector(appTapped:) forControlEvents:UIControlEventTouchUpInside];
 
-        UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake((itemWidth - itemIconSize) / 2.0, 0, itemIconSize, itemIconSize)];
+        UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake(floor((itemWidth - iconSize) / 2.0), 0, iconSize, iconSize)];
         icon.image = SplitCarPlayAppIcon(bundleID);
         icon.contentMode = UIViewContentModeScaleAspectFit;
-        icon.layer.cornerRadius = 12;
+        icon.layer.cornerRadius = 13;
         icon.layer.masksToBounds = YES;
         icon.userInteractionEnabled = NO;
         [button addSubview:icon];
 
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, itemIconSize + 2, itemWidth, 16)];
-        label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
+        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(1, iconSize + 4, itemWidth - 2, labelH)];
+        label.text = name;
         label.font = [UIFont systemFontOfSize:11];
-        label.textColor = [UIColor blackColor];
+        label.textColor = [UIColor colorWithWhite:0.2 alpha:1];
         label.textAlignment = NSTextAlignmentCenter;
         label.lineBreakMode = NSLineBreakByTruncatingTail;
         label.userInteractionEnabled = NO;
@@ -275,11 +308,11 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
         col++;
         if (col >= columns) {
             col = 0;
-            rowY += itemIconSize + 26 + padding;
+            rowY += itemHeight + rowGap;
         }
     }
-    if (col != 0) rowY += itemIconSize + 26 + padding;
-    return rowY + 14;
+    if (col != 0) rowY += itemHeight + rowGap;
+    return rowY + 6;
 }
 
 - (void)appTapped:(UIButton *)sender {

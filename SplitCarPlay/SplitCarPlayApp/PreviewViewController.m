@@ -178,6 +178,34 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     return nil;
 }
 
+#pragma mark - Small UI helpers
+
+// SF Symbol at a fixed point size. Deployment target is iOS 14, so the
+// availability check is always true on real devices; kept anyway so the
+// file stays self-evidently safe if the target is ever lowered.
+static UIImage *SCPSymbol(NSString *name, CGFloat pointSize, BOOL bold) {
+    if (@available(iOS 13.0, *)) {
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:pointSize
+                                                                                               weight:(bold ? UIImageSymbolWeightBold : UIImageSymbolWeightMedium)];
+        return [UIImage systemImageNamed:name withConfiguration:config];
+    }
+    return nil;
+}
+
+static CGFloat SCPHairline(void) {
+    CGFloat scale = [UIScreen mainScreen].scale;
+    return scale > 0 ? 1.0 / scale : 1.0;
+}
+
+// Pref values are expected to be strings; anything else (missing, wrong
+// type) reads as "" so callers can just check .length.
+static NSString *SCPStringPref(NSDictionary *prefs, NSString *key) {
+    id value = prefs[key];
+    return [value isKindOfClass:[NSString class]] ? (NSString *)value : @"";
+}
+
+static NSString * const kSCPVietmapBundleID = @"vn.vietmap.live";
+
 #pragma mark - Minimal bubble preview (3 styles — mirrors Tweak.xm's SpeedBubbleView)
 
 @interface PreviewBubbleView : UIView
@@ -191,10 +219,11 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 // Fires once per drag/pinch gesture (on end), not per-frame, so the
 // Preview controller can persist without spamming disk writes.
 @property (nonatomic, copy) void (^onUserAdjusted)(void);
-// isLive = real Vietmap Live data vs. made-up demo numbers (controls the
-// status icon/text and whether the ring/bar tint as "connected"); the
-// speed number itself always shows (demo or real) so the preview always
-// looks populated.
+// isLive = real Vietmap Live data vs. made-up demo numbers. The Card style
+// switches between two looks: idle (date / battery / big number / dashed
+// speed-limit circle, plus a small "Demo" tag so the made-up number is
+// never mistaken for real data) and connected (speed in a green-bordered
+// box, green check, Vietmap icon, "Đã kết nối VIETMAP LIVE", green bar).
 - (void)applySpeedText:(NSString *)text overLimit:(BOOL)overLimit isLive:(BOOL)isLive;
 @end
 
@@ -203,87 +232,88 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     UILabel *_speedLabel;
     UILabel *_unitLabel;
     UIImageView *_statusIconView;
-    UILabel *_statusLabel;
     UIView *_statusBar;
     UILabel *_extrasLabel;        // date, its own line
     UIImageView *_batteryIconView;
-    UILabel *_batteryLabel;       // battery %, its own line
-    UIView *_compassView;         // dashed-circle heading indicator, see Tweak.xm's SpeedBubbleView for why it's always "--"
+    UILabel *_batteryLabel;       // battery %, same line as the glyph
+    UIView *_separator;
+    UIView *_compassView;         // dashed circle for the speed limit -- always "--" in this preview
     CAShapeLayer *_compassDashLayer;
     UILabel *_compassLabel;
+    UILabel *_demoLabel;
+    UIImageView *_liveAppIconView;
+    UILabel *_liveTextLabel;
     CAShapeLayer *_ringLayer;
-    CAShapeLayer *_maskLayer;
     UIPanGestureRecognizer *_pan;
     UIPinchGestureRecognizer *_pinch;
     CGFloat _currentScale;
+    BOOL _isLive;
+    BOOL _overLimit;
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        self.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.96];
-        self.layer.borderWidth = 1;
-        self.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.08].CGColor;
-
-        // Rounded-corner clip via a mask (not masksToBounds=YES), so the
-        // drop shadow below isn't clipped away too — same technique as
-        // the real SpeedBubbleView in Tweak.xm.
+        self.backgroundColor = [UIColor whiteColor];
+        self.layer.borderWidth = SCPHairline();
+        self.layer.borderColor = [UIColor colorWithWhite:0 alpha:0.10].CGColor;
+        // Plain cornerRadius (no mask, no masksToBounds) so the soft drop
+        // shadow isn't clipped; every subview is laid out inside the
+        // rounded area, so nothing pokes out of the corners.
         self.layer.masksToBounds = NO;
-        _maskLayer = [CAShapeLayer new];
-        self.layer.mask = _maskLayer;
         self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.25;
-        self.layer.shadowRadius = 6;
-        self.layer.shadowOffset = CGSizeMake(0, 2);
+        self.layer.shadowOpacity = 0.16;
+        self.layer.shadowRadius = 8;
+        self.layer.shadowOffset = CGSizeMake(0, 3);
+
+        UIColor *secondary = [UIColor colorWithWhite:0.45 alpha:1];
 
         _speedBox = [[UIView alloc] init];
         _speedBox.backgroundColor = [UIColor whiteColor];
-        _speedBox.layer.cornerRadius = 8;
-        _speedBox.layer.borderWidth = 1.5;
+        _speedBox.layer.cornerRadius = 10;
+        _speedBox.layer.borderWidth = 2;
         [self addSubview:_speedBox];
 
         _speedLabel = [[UILabel alloc] init];
         _speedLabel.textAlignment = NSTextAlignmentCenter;
-        _speedLabel.font = [UIFont boldSystemFontOfSize:28];
+        _speedLabel.font = [UIFont systemFontOfSize:40 weight:UIFontWeightSemibold];
+        _speedLabel.adjustsFontSizeToFitWidth = YES;
+        _speedLabel.minimumScaleFactor = 0.5;
+        _speedLabel.textColor = [UIColor colorWithWhite:0.1 alpha:1];
         _speedLabel.text = @"--";
-        [_speedBox addSubview:_speedLabel];
         [self addSubview:_speedLabel];
 
         _unitLabel = [[UILabel alloc] init];
         _unitLabel.textAlignment = NSTextAlignmentCenter;
         _unitLabel.font = [UIFont systemFontOfSize:11];
-        _unitLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        _unitLabel.textColor = secondary;
         _unitLabel.text = @"km/h";
-        [_speedBox addSubview:_unitLabel];
         [self addSubview:_unitLabel];
 
         _statusIconView = [[UIImageView alloc] init];
         _statusIconView.contentMode = UIViewContentModeScaleAspectFit;
         [self addSubview:_statusIconView];
 
-        _statusLabel = [[UILabel alloc] init];
-        _statusLabel.font = [UIFont systemFontOfSize:10 weight:UIFontWeightMedium];
-        _statusLabel.textAlignment = NSTextAlignmentLeft;
-        _statusLabel.numberOfLines = 1;
-        _statusLabel.textColor = [UIColor colorWithWhite:0.35 alpha:1];
-        [self addSubview:_statusLabel];
-
         _extrasLabel = [[UILabel alloc] init];
-        _extrasLabel.textAlignment = NSTextAlignmentLeft;
-        _extrasLabel.font = [UIFont systemFontOfSize:11];
-        _extrasLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        _extrasLabel.textAlignment = NSTextAlignmentCenter;
+        _extrasLabel.font = [UIFont systemFontOfSize:12];
+        _extrasLabel.textColor = secondary;
         [self addSubview:_extrasLabel];
 
         _batteryIconView = [[UIImageView alloc] init];
         _batteryIconView.contentMode = UIViewContentModeScaleAspectFit;
-        _batteryIconView.tintColor = [UIColor colorWithWhite:0.4 alpha:1];
+        _batteryIconView.tintColor = secondary;
         [self addSubview:_batteryIconView];
 
         _batteryLabel = [[UILabel alloc] init];
         _batteryLabel.textAlignment = NSTextAlignmentLeft;
-        _batteryLabel.font = [UIFont systemFontOfSize:11];
-        _batteryLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+        _batteryLabel.font = [UIFont systemFontOfSize:12];
+        _batteryLabel.textColor = secondary;
         [self addSubview:_batteryLabel];
+
+        _separator = [[UIView alloc] init];
+        _separator.backgroundColor = [UIColor colorWithWhite:0.86 alpha:1];
+        [self addSubview:_separator];
 
         _compassView = [[UIView alloc] init];
         _compassView.backgroundColor = [UIColor clearColor];
@@ -299,9 +329,39 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         _compassLabel = [[UILabel alloc] init];
         _compassLabel.text = @"--";
         _compassLabel.textAlignment = NSTextAlignmentCenter;
-        _compassLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        _compassLabel.font = [UIFont systemFontOfSize:14 weight:UIFontWeightMedium];
         _compassLabel.textColor = [UIColor colorWithWhite:0.55 alpha:1];
         [_compassView addSubview:_compassLabel];
+
+        _demoLabel = [[UILabel alloc] init];
+        _demoLabel.text = @"Demo";
+        _demoLabel.textAlignment = NSTextAlignmentCenter;
+        _demoLabel.font = [UIFont systemFontOfSize:9 weight:UIFontWeightMedium];
+        _demoLabel.textColor = [UIColor systemOrangeColor];
+        [self addSubview:_demoLabel];
+
+        _liveAppIconView = [[UIImageView alloc] init];
+        _liveAppIconView.contentMode = UIViewContentModeScaleAspectFit;
+        _liveAppIconView.layer.cornerRadius = 7;
+        _liveAppIconView.layer.masksToBounds = YES;
+        [self addSubview:_liveAppIconView];
+
+        NSMutableParagraphStyle *centered = [[NSMutableParagraphStyle alloc] init];
+        centered.alignment = NSTextAlignmentCenter;
+        NSMutableAttributedString *liveText = [[NSMutableAttributedString alloc] initWithString:@"Đã kết nối\n" attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:10 weight:UIFontWeightMedium],
+            NSForegroundColorAttributeName: [UIColor colorWithWhite:0.25 alpha:1],
+            NSParagraphStyleAttributeName: centered,
+        }];
+        [liveText appendAttributedString:[[NSAttributedString alloc] initWithString:@"VIETMAP\nLIVE" attributes:@{
+            NSFontAttributeName: [UIFont systemFontOfSize:11 weight:UIFontWeightBold],
+            NSForegroundColorAttributeName: [UIColor systemGreenColor],
+            NSParagraphStyleAttributeName: centered,
+        }]];
+        _liveTextLabel = [[UILabel alloc] init];
+        _liveTextLabel.numberOfLines = 0;
+        _liveTextLabel.attributedText = liveText;
+        [self addSubview:_liveTextLabel];
 
         _statusBar = [[UIView alloc] init];
         [self addSubview:_statusBar];
@@ -354,92 +414,130 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     [self setNeedsLayout];
 }
 
-- (void)updateMaskWithCornerRadius:(CGFloat)radius {
+- (void)applyCornerRadius:(CGFloat)radius {
     self.layer.cornerRadius = radius;
-    _maskLayer.frame = self.bounds;
-    _maskLayer.path = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+    self.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:self.bounds cornerRadius:radius].CGPath;
+}
+
+// Every style starts from "nothing optional visible" and turns on only
+// what it uses -- keeps the three layouts from leaking views into each other.
+- (void)hideOptionalViews {
+    _speedBox.hidden = YES;
+    _statusIconView.hidden = YES;
+    _statusBar.hidden = YES;
+    _extrasLabel.hidden = YES;
+    _batteryIconView.hidden = YES;
+    _batteryLabel.hidden = YES;
+    _separator.hidden = YES;
+    _compassView.hidden = YES;
+    _demoLabel.hidden = YES;
+    _liveAppIconView.hidden = YES;
+    _liveTextLabel.hidden = YES;
+    _ringLayer.hidden = YES;
 }
 
 - (void)layoutSubviews {
     [super layoutSubviews];
+    [self hideOptionalViews];
     switch (self.style) {
         case SplitCarPlayBubbleStyleRing: [self layoutRing]; return;
         case SplitCarPlayBubbleStyleBar: [self layoutBar]; return;
-        case SplitCarPlayBubbleStyleCard: default: [self layoutCard]; return;
+        case SplitCarPlayBubbleStyleCard: default:
+            [self applyCornerRadius:14];
+            if (_isLive) {
+                [self layoutCardLive];
+            } else {
+                [self layoutCardIdle];
+            }
+            return;
     }
 }
 
-- (void)layoutCard {
-    [self updateMaskWithCornerRadius:14];
-    _ringLayer.hidden = YES;
-    _speedBox.hidden = NO;
-    _speedLabel.font = [UIFont boldSystemFontOfSize:28];
-    [_speedBox addSubview:_speedLabel];
-    [_speedBox addSubview:_unitLabel];
-    _statusIconView.hidden = NO;
-    _statusLabel.hidden = NO;
-    _statusBar.hidden = NO;
-
+- (void)layoutCardIdle {
     CGFloat w = self.bounds.size.width, pad = 8;
     CGFloat y = pad;
 
-    // Date and battery on their own lines -- matches the reference
-    // screenshot's stacked "T5, 5/11" / "77%" rather than one combined
-    // centered line.
-    _extrasLabel.hidden = !self.showDate;
-    if (!_extrasLabel.hidden) {
+    if (self.showDate) {
+        _extrasLabel.hidden = NO;
         _extrasLabel.text = SplitCarPlayWeekdayDateString([NSDate date]);
-        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 14);
+        _extrasLabel.frame = CGRectMake(pad, y, w - pad * 2, 15);
         y = CGRectGetMaxY(_extrasLabel.frame) + 1;
     }
     UIDevice *device = [UIDevice currentDevice];
-    BOOL showBatteryRow = self.showBattery && device.batteryState != UIDeviceBatteryStateUnknown;
-    _batteryIconView.hidden = !showBatteryRow;
-    _batteryLabel.hidden = !showBatteryRow;
-    if (showBatteryRow) {
+    if (self.showBattery && device.batteryState != UIDeviceBatteryStateUnknown && device.batteryLevel >= 0) {
+        _batteryLabel.hidden = NO;
+        _batteryIconView.hidden = NO;
         _batteryLabel.text = [NSString stringWithFormat:@"%.0f%%", device.batteryLevel * 100];
         _batteryIconView.image = SplitCarPlayBatteryIcon(device.batteryLevel);
-        CGFloat battIconSize = 12;
-        _batteryIconView.frame = CGRectMake(pad, y + 1, battIconSize, battIconSize);
-        _batteryLabel.frame = CGRectMake(CGRectGetMaxX(_batteryIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_batteryIconView.frame) - 4, 14);
-        y = CGRectGetMaxY(_batteryLabel.frame) + 4;
+        CGFloat labelW = ceil([_batteryLabel sizeThatFits:CGSizeMake(w, 15)].width);
+        CGFloat glyphW = 20, gap = 3;
+        CGFloat x0 = floor((w - (labelW + gap + glyphW)) / 2.0);
+        _batteryLabel.frame = CGRectMake(x0, y, labelW, 15);
+        _batteryIconView.frame = CGRectMake(x0 + labelW + gap, y + 2, glyphW, 11);
+        y += 15;
+    }
+    if (y > pad) {
+        y += 5;
+        _separator.hidden = NO;
+        _separator.frame = CGRectMake(pad, y, w - pad * 2, SCPHairline());
+        y += 4;
     }
 
-    _speedBox.frame = CGRectMake(pad, y, w - pad * 2, 52);
-    _speedLabel.frame = CGRectMake(0, 4, _speedBox.bounds.size.width, 30);
-    _unitLabel.frame = CGRectMake(0, 34, _speedBox.bounds.size.width, 14);
-    y = CGRectGetMaxY(_speedBox.frame) + 8;
+    [self addSubview:_speedLabel];
+    [self addSubview:_unitLabel];
+    _speedLabel.font = [UIFont systemFontOfSize:40 weight:UIFontWeightSemibold];
+    _speedLabel.frame = CGRectMake(4, y, w - 8, 46);
+    _unitLabel.frame = CGRectMake(0, CGRectGetMaxY(_speedLabel.frame) - 2, w, 13);
+    y = CGRectGetMaxY(_unitLabel.frame) + 8;
 
-    // Dashed-circle heading indicator, matching the reference screenshot
-    // -- see the ivar comment on _compassView for why it's always "--".
-    CGFloat compassSize = MIN(60, w - pad * 2);
+    CGFloat compassSize = MIN(54, w - pad * 2);
     _compassView.hidden = NO;
-    _compassView.frame = CGRectMake((w - compassSize) / 2.0, y, compassSize, compassSize);
+    _compassView.frame = CGRectMake(floor((w - compassSize) / 2.0), y, compassSize, compassSize);
     _compassLabel.frame = _compassView.bounds;
     _compassDashLayer.frame = _compassView.bounds;
     _compassDashLayer.path = [UIBezierPath bezierPathWithOvalInRect:CGRectInset(_compassView.bounds, 1, 1)].CGPath;
-    y = CGRectGetMaxY(_compassView.frame) + 8;
+    y = CGRectGetMaxY(_compassView.frame) + 4;
 
-    CGFloat iconSize = 14;
-    _statusIconView.frame = CGRectMake(pad, y + 1, iconSize, iconSize);
-    _statusLabel.frame = CGRectMake(CGRectGetMaxX(_statusIconView.frame) + 4, y, w - pad - CGRectGetMaxX(_statusIconView.frame) - 4, iconSize + 2);
+    _demoLabel.hidden = NO;
+    _demoLabel.frame = CGRectMake(0, y, w, 11);
+}
 
-    CGFloat barHeight = 4;
-    _statusBar.frame = CGRectMake(pad, self.bounds.size.height - barHeight - 6, w - pad * 2, barHeight);
+- (void)layoutCardLive {
+    CGFloat w = self.bounds.size.width, h = self.bounds.size.height, pad = 8;
+
+    CGFloat boxW = MIN(w - pad * 2, 68);
+    _speedBox.hidden = NO;
+    _speedBox.frame = CGRectMake(floor((w - boxW) / 2.0), pad + 2, boxW, 56);
+    [_speedBox addSubview:_speedLabel];
+    [_speedBox addSubview:_unitLabel];
+    _speedLabel.font = [UIFont systemFontOfSize:28 weight:UIFontWeightSemibold];
+    _speedLabel.frame = CGRectMake(2, 5, boxW - 4, 32);
+    _unitLabel.frame = CGRectMake(0, 36, boxW, 13);
+    CGFloat y = CGRectGetMaxY(_speedBox.frame) + 8;
+
+    CGFloat checkSize = 20;
+    _statusIconView.hidden = NO;
+    _statusIconView.frame = CGRectMake(floor((w - checkSize) / 2.0), y, checkSize, checkSize);
+    y += checkSize + 6;
+
+    CGFloat appIconSize = 28;
+    _liveAppIconView.hidden = NO;
+    _liveAppIconView.frame = CGRectMake(floor((w - appIconSize) / 2.0), y, appIconSize, appIconSize);
+    y += appIconSize + 6;
+
+    _liveTextLabel.hidden = NO;
+    _liveTextLabel.frame = CGRectMake(4, y, w - 8, 44);
+
+    CGFloat barHeight = 3, barInset = pad + 4;
+    _statusBar.hidden = NO;
+    _statusBar.frame = CGRectMake(barInset, h - barHeight - 7, w - barInset * 2, barHeight);
     _statusBar.layer.cornerRadius = barHeight / 2.0;
 }
 
 - (void)layoutRing {
     CGFloat side = MIN(self.bounds.size.width, self.bounds.size.height);
-    [self updateMaskWithCornerRadius:side / 2.0];
+    [self applyCornerRadius:side / 2.0];
     _ringLayer.hidden = NO;
-    _speedBox.hidden = YES;
-    _statusLabel.hidden = YES;
-    _statusBar.hidden = YES;
-    _extrasLabel.hidden = YES;
-    _batteryIconView.hidden = YES;
-    _batteryLabel.hidden = YES;
-    _compassView.hidden = YES;
 
     CGRect ringFrame = CGRectMake((self.bounds.size.width - side) / 2.0, (self.bounds.size.height - side) / 2.0, side, side);
     CGFloat inset = _ringLayer.lineWidth / 2.0 + 2;
@@ -448,7 +546,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 
     _speedLabel.font = [UIFont boldSystemFontOfSize:28];
     [self addSubview:_speedLabel];
-    _speedLabel.frame = CGRectMake(0, side / 2.0 - 20, self.bounds.size.width, 28);
+    _speedLabel.frame = CGRectMake(10, side / 2.0 - 20, self.bounds.size.width - 20, 28);
     [self addSubview:_unitLabel];
     _unitLabel.frame = CGRectMake(0, side / 2.0 + 6, self.bounds.size.width, 14);
 
@@ -458,21 +556,13 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 }
 
 - (void)layoutBar {
-    [self updateMaskWithCornerRadius:self.bounds.size.height / 2.0];
-    _ringLayer.hidden = YES;
-    _speedBox.hidden = YES;
-    _statusLabel.hidden = YES;
+    [self applyCornerRadius:self.bounds.size.height / 2.0];
     _statusBar.hidden = NO;
-    _extrasLabel.hidden = YES;
-    _batteryIconView.hidden = YES;
-    _batteryLabel.hidden = YES;
-    _compassView.hidden = YES;
 
     CGFloat h = self.bounds.size.height, pad = 10;
     CGFloat iconSize = MIN(16, h - 8);
     _statusIconView.hidden = NO;
-    _statusIconView.frame = CGRectMake(pad, (h - iconSize) / 2.0, iconSize, iconSize);
-    [self addSubview:_statusIconView];
+    _statusIconView.frame = CGRectMake(pad + 4, (h - iconSize) / 2.0, iconSize, iconSize);
 
     _speedLabel.font = [UIFont boldSystemFontOfSize:MIN(22, h * 0.5)];
     [self addSubview:_speedLabel];
@@ -481,74 +571,375 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     _unitLabel.frame = CGRectMake(CGRectGetMaxX(_speedLabel.frame), 0, 36, h);
 
     CGFloat barHeight = 3;
-    _statusBar.frame = CGRectMake(pad, h - barHeight - 3, self.bounds.size.width - pad * 2, barHeight);
+    _statusBar.frame = CGRectMake(pad + 8, h - barHeight - 3, self.bounds.size.width - (pad + 8) * 2, barHeight);
     _statusBar.layer.cornerRadius = barHeight / 2.0;
 }
 
 - (void)applySpeedText:(NSString *)text overLimit:(BOOL)overLimit isLive:(BOOL)isLive {
+    _isLive = isLive;
+    _overLimit = overLimit;
     _speedLabel.text = text.length > 0 ? text : @"--";
-    UIColor *accent = overLimit ? [UIColor systemRedColor] : [UIColor colorWithWhite:0.75 alpha:1];
+    _speedLabel.textColor = overLimit ? [UIColor systemRedColor] : [UIColor colorWithWhite:0.1 alpha:1];
+
+    UIColor *accent = overLimit ? [UIColor systemRedColor]
+        : (isLive ? [UIColor systemGreenColor] : [UIColor colorWithWhite:0.75 alpha:1]);
     _speedBox.layer.borderColor = accent.CGColor;
-    _ringLayer.strokeColor = (overLimit ? [UIColor systemRedColor] : [UIColor systemGrayColor]).CGColor;
+    _ringLayer.strokeColor = (overLimit ? [UIColor systemRedColor]
+        : (isLive ? [UIColor systemGreenColor] : [UIColor systemGrayColor])).CGColor;
     if (@available(iOS 13.0, *)) {
         _statusIconView.image = [UIImage systemImageNamed:isLive ? @"checkmark.circle.fill" : @"questionmark.circle"];
     }
     _statusIconView.tintColor = isLive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor];
-    _statusLabel.text = isLive ? @"Vietmap Live" : @"Demo";
     _statusBar.backgroundColor = overLimit ? [UIColor systemRedColor]
         : (isLive ? [UIColor systemGreenColor] : [UIColor systemOrangeColor]);
+    if (isLive && !_liveAppIconView.image) {
+        _liveAppIconView.image = SplitCarPlayAppIcon(kSCPVietmapBundleID);
+    }
+    [self setNeedsLayout];
+}
+
+@end
+
+#pragma mark - One pane of the split preview (browser-tab look)
+
+static const CGFloat kSCPPaneBarHeight = 34;
+static const CGFloat kSCPPaneCircleSize = 18;
+static const CGFloat kSCPPaneButtonSlot = 24; // tap target per circle button; the visible circle is kSCPPaneCircleSize
+static const CGFloat kSCPPaneGap = 6;         // gap between the two panes (the divider pill sits over it)
+static const CGFloat kSCPCarFramePad = 6;     // outer car-screen frame around both panes
+
+// A UIButton whose visible part is a small colored circle centered in a
+// bigger tap target. The circle is a non-interactive subview kept behind
+// the button's image view.
+@interface SCPCircleButton : UIButton
+@property (nonatomic, strong) UIView *circleView;
+@end
+
+@implementation SCPCircleButton
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat s = kSCPPaneCircleSize;
+    self.circleView.frame = CGRectMake(floor((self.bounds.size.width - s) / 2.0),
+                                       floor((self.bounds.size.height - s) / 2.0), s, s);
+    [self sendSubviewToBack:self.circleView];
+}
+@end
+
+static SCPCircleButton *SCPMakeCircleButton(NSString *symbolName) {
+    SCPCircleButton *button = [SCPCircleButton buttonWithType:UIButtonTypeCustom];
+    UIView *circle = [[UIView alloc] init];
+    circle.userInteractionEnabled = NO; // touches must land on the button itself
+    circle.layer.cornerRadius = kSCPPaneCircleSize / 2.0;
+    [button addSubview:circle];
+    button.circleView = circle;
+    [button setImage:[SCPSymbol(symbolName, 8, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate]
+            forState:UIControlStateNormal];
+    return button;
+}
+
+static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor *glyph, BOOL enabled) {
+    button.circleView.backgroundColor = fill;
+    button.tintColor = glyph;
+    button.enabled = enabled;
+}
+
+@interface PreviewPaneView : UIView
+@property (nonatomic, strong, readonly) UIControl *tabControl;
+@property (nonatomic, strong, readonly) SCPCircleButton *reloadButton;
+@property (nonatomic, strong, readonly) SCPCircleButton *swapButton;
+@property (nonatomic, strong, readonly) SCPCircleButton *closeButton;
+// Filled in by PreviewViewController (it owns the recent-apps data and the
+// tap targets); the pane only sizes it to its content area.
+@property (nonatomic, strong, readonly) UIView *emptyState;
+@property (nonatomic, assign) CGSize emptyStateBuiltSize; // controller's "already populated at this size" marker
+@property (nonatomic, assign, readonly) BOOL isEmpty;
+- (void)showEmpty;
+- (void)showAppNamed:(NSString *)name icon:(UIImage *)icon snapshot:(UIImage *)snapshot;
+@end
+
+@implementation PreviewPaneView {
+    UIView *_bar;
+    UIImageView *_tabIcon;
+    UILabel *_tabLabel;
+    UIImageView *_tabChevron;
+    UIView *_contentView;
+    UIImageView *_snapshotView;
+    UIView *_pickedTile;
+    UIImageView *_pickedIcon;
+    UILabel *_pickedName;
+    UILabel *_pickedSubtitle;
+    BOOL _hasSnapshot;
+}
+
+- (instancetype)initWithFrame:(CGRect)frame {
+    self = [super initWithFrame:frame];
+    if (self) {
+        UIColor *paper = [UIColor colorWithWhite:0.985 alpha:1];
+        self.backgroundColor = paper;
+        self.layer.cornerRadius = 10;
+        self.layer.masksToBounds = YES;
+        self.layer.borderWidth = SCPHairline();
+        self.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+
+        _contentView = [[UIView alloc] init];
+        _contentView.backgroundColor = paper;
+        _contentView.clipsToBounds = YES;
+        [self addSubview:_contentView];
+
+        _snapshotView = [[UIImageView alloc] init];
+        _snapshotView.contentMode = UIViewContentModeScaleToFill; // frame is computed as an aspect-fill, top-aligned rect
+        [_contentView addSubview:_snapshotView];
+
+        _pickedTile = [[UIView alloc] init];
+        _pickedTile.backgroundColor = [UIColor whiteColor];
+        _pickedTile.layer.cornerRadius = 14;
+        _pickedTile.layer.shadowColor = [UIColor blackColor].CGColor;
+        _pickedTile.layer.shadowOpacity = 0.12;
+        _pickedTile.layer.shadowRadius = 6;
+        _pickedTile.layer.shadowOffset = CGSizeMake(0, 2);
+        [_contentView addSubview:_pickedTile];
+
+        _pickedIcon = [[UIImageView alloc] init];
+        _pickedIcon.contentMode = UIViewContentModeScaleAspectFit;
+        _pickedIcon.layer.cornerRadius = 10;
+        _pickedIcon.layer.masksToBounds = YES;
+        [_pickedTile addSubview:_pickedIcon];
+
+        _pickedName = [[UILabel alloc] init];
+        _pickedName.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+        _pickedName.textColor = [UIColor colorWithWhite:0.15 alpha:1];
+        _pickedName.textAlignment = NSTextAlignmentCenter;
+        _pickedName.lineBreakMode = NSLineBreakByTruncatingTail;
+        [_contentView addSubview:_pickedName];
+
+        // Honest about what this screen can do: it shows iOS's cached
+        // app-switcher snapshot, which only exists after the app has been
+        // opened (and backgrounded) at least once. It cannot launch apps.
+        _pickedSubtitle = [[UILabel alloc] init];
+        _pickedSubtitle.text = @"Mở app này 1 lần để có ảnh xem trước";
+        _pickedSubtitle.font = [UIFont systemFontOfSize:11];
+        _pickedSubtitle.textColor = [UIColor colorWithWhite:0.5 alpha:1];
+        _pickedSubtitle.textAlignment = NSTextAlignmentCenter;
+        _pickedSubtitle.numberOfLines = 3;
+        [_contentView addSubview:_pickedSubtitle];
+
+        _emptyState = [[UIView alloc] init];
+        [_contentView addSubview:_emptyState];
+
+        _bar = [[UIView alloc] init];
+        _bar.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
+        [self addSubview:_bar];
+
+        // The "browser tab": same color as the content below so it reads
+        // as one piece, rounded on its top corners only.
+        _tabControl = [[UIControl alloc] init];
+        _tabControl.backgroundColor = paper;
+        _tabControl.layer.cornerRadius = 8;
+        _tabControl.layer.maskedCorners = kCALayerMinXMinYCorner | kCALayerMaxXMinYCorner;
+        [_bar addSubview:_tabControl];
+
+        _tabIcon = [[UIImageView alloc] init];
+        _tabIcon.contentMode = UIViewContentModeScaleAspectFit;
+        _tabIcon.layer.masksToBounds = YES;
+        [_tabControl addSubview:_tabIcon];
+
+        _tabLabel = [[UILabel alloc] init];
+        _tabLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
+        _tabLabel.textColor = [UIColor colorWithWhite:0.2 alpha:1];
+        _tabLabel.lineBreakMode = NSLineBreakByTruncatingTail;
+        [_tabControl addSubview:_tabLabel];
+
+        _tabChevron = [[UIImageView alloc] init];
+        _tabChevron.contentMode = UIViewContentModeScaleAspectFit;
+        _tabChevron.image = [SCPSymbol(@"chevron.down", 8, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+        _tabChevron.tintColor = [UIColor colorWithWhite:0.45 alpha:1];
+        [_tabControl addSubview:_tabChevron];
+
+        _reloadButton = SCPMakeCircleButton(@"arrow.clockwise");
+        _swapButton = SCPMakeCircleButton(@"arrow.left.arrow.right");
+        _closeButton = SCPMakeCircleButton(@"xmark");
+        _reloadButton.accessibilityLabel = @"Tải lại ảnh xem trước";
+        _swapButton.accessibilityLabel = @"Đổi chỗ 2 ô";
+        _closeButton.accessibilityLabel = @"Bỏ app khỏi ô này";
+        [_bar addSubview:_reloadButton];
+        [_bar addSubview:_swapButton];
+        [_bar addSubview:_closeButton];
+
+        [self showEmpty];
+    }
+    return self;
+}
+
+- (void)showEmpty {
+    _isEmpty = YES;
+    _hasSnapshot = NO;
+    _tabIcon.image = [SCPSymbol(@"plus", 11, NO) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    _tabIcon.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
+    _tabIcon.layer.cornerRadius = 0;
+    _tabLabel.text = @"Tab mới";
+    _tabControl.accessibilityLabel = @"Tab mới, chọn app";
+    _snapshotView.image = nil;
+    _pickedIcon.image = nil;
+    _pickedName.text = nil;
+    [self setNeedsLayout];
+}
+
+- (void)showAppNamed:(NSString *)name icon:(UIImage *)icon snapshot:(UIImage *)snapshot {
+    _isEmpty = NO;
+    _hasSnapshot = snapshot != nil;
+    _tabIcon.image = icon;
+    _tabIcon.layer.cornerRadius = 4;
+    _tabLabel.text = name;
+    _tabControl.accessibilityLabel = name;
+    _snapshotView.image = snapshot;
+    _pickedIcon.image = icon;
+    _pickedName.text = name;
+    [self setNeedsLayout];
+}
+
+- (void)layoutSubviews {
+    [super layoutSubviews];
+    CGFloat w = self.bounds.size.width, h = self.bounds.size.height;
+    _bar.frame = CGRectMake(0, 0, w, kSCPPaneBarHeight);
+    _contentView.frame = CGRectMake(0, kSCPPaneBarHeight, w, MAX(0, h - kSCPPaneBarHeight));
+    [self layoutBar];
+    [self layoutContent];
+}
+
+- (void)layoutBar {
+    CGFloat w = _bar.bounds.size.width, barH = kSCPPaneBarHeight;
+    CGFloat slot = kSCPPaneButtonSlot, rightPad = 5;
+
+    // A very narrow pane (split dragged far to one side) keeps only ✕.
+    BOOL roomForAll = w >= rightPad + slot * 3 + 12 + 40;
+    _reloadButton.hidden = !roomForAll;
+    _swapButton.hidden = !roomForAll;
+    CGFloat x = w - rightPad - slot;
+    _closeButton.frame = CGRectMake(x, 0, slot, barH);
+    if (roomForAll) {
+        x -= slot;
+        _swapButton.frame = CGRectMake(x, 0, slot, barH);
+        x -= slot;
+        _reloadButton.frame = CGRectMake(x, 0, slot, barH);
+    }
+
+    CGFloat tabX = 6, tabY = 6, tabH = barH - tabY, pad = 8;
+    CGFloat avail = MAX(0, x - 4 - tabX);
+    CGFloat iconSize = _isEmpty ? 12 : 16;
+    CGFloat gapIconLabel = _isEmpty ? 5 : 6, gapLabelChevron = 4, chevronW = 9;
+    CGFloat labelW = ceil([_tabLabel sizeThatFits:CGSizeMake(CGFLOAT_MAX, tabH)].width);
+    CGFloat fixedW = pad + iconSize + gapIconLabel + gapLabelChevron + chevronW + pad;
+    CGFloat iconOnlyW = pad + iconSize + pad;
+
+    BOOL showLabel = NO;
+    CGFloat tabW = iconOnlyW;
+    if (avail >= fixedW + labelW) {
+        showLabel = YES;
+        tabW = fixedW + labelW;
+    } else if (!_isEmpty && avail >= fixedW + 28) {
+        showLabel = YES; // app name, truncated
+        labelW = avail - fixedW;
+        tabW = avail;
+    } else {
+        tabW = MIN(MAX(avail, 24), iconOnlyW); // just "+" or just the icon
+    }
+
+    _tabControl.frame = CGRectMake(tabX, tabY, tabW, tabH);
+    _tabLabel.hidden = !showLabel;
+    _tabChevron.hidden = !showLabel;
+    CGFloat iconX = showLabel ? pad : floor((tabW - iconSize) / 2.0);
+    _tabIcon.frame = CGRectMake(iconX, floor((tabH - iconSize) / 2.0), iconSize, iconSize);
+    if (showLabel) {
+        _tabLabel.frame = CGRectMake(CGRectGetMaxX(_tabIcon.frame) + gapIconLabel, 0, MAX(0, labelW), tabH);
+        _tabChevron.frame = CGRectMake(CGRectGetMaxX(_tabLabel.frame) + gapLabelChevron, floor((tabH - 9) / 2.0), chevronW, 9);
+    }
+}
+
+- (void)layoutContent {
+    CGFloat cw = _contentView.bounds.size.width, ch = _contentView.bounds.size.height;
+    BOOL showPicked = !_isEmpty && !_hasSnapshot;
+
+    _emptyState.frame = _contentView.bounds;
+    _emptyState.hidden = !_isEmpty;
+    _snapshotView.hidden = !_hasSnapshot;
+    _pickedTile.hidden = !showPicked;
+    _pickedName.hidden = !showPicked;
+    _pickedSubtitle.hidden = !showPicked;
+
+    if (_hasSnapshot) {
+        // Aspect fill, but pinned to the top edge (status bar / app header
+        // of the snapshot stays visible) instead of UIKit's centered fill.
+        CGSize imageSize = _snapshotView.image.size;
+        if (imageSize.width > 0 && imageSize.height > 0 && cw > 0 && ch > 0) {
+            CGFloat s = MAX(cw / imageSize.width, ch / imageSize.height);
+            CGFloat drawW = ceil(imageSize.width * s), drawH = ceil(imageSize.height * s);
+            _snapshotView.frame = CGRectMake(floor((cw - drawW) / 2.0), 0, drawW, drawH);
+        } else {
+            _snapshotView.frame = _contentView.bounds;
+        }
+    }
+
+    if (showPicked) {
+        CGFloat tile = MIN(64, MAX(0, cw - 16));
+        CGFloat textW = MAX(0, cw - 20);
+        CGFloat subH = MIN(44, ceil([_pickedSubtitle sizeThatFits:CGSizeMake(textW, CGFLOAT_MAX)].height));
+        CGFloat blockH = tile + 10 + 20 + 4 + subH;
+        CGFloat y = MAX(8, floor((ch - blockH) / 2.0) - 8);
+        _pickedTile.frame = CGRectMake(floor((cw - tile) / 2.0), y, tile, tile);
+        _pickedTile.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_pickedTile.bounds cornerRadius:14].CGPath;
+        CGFloat icon = floor(tile * 0.69);
+        _pickedIcon.frame = CGRectMake(floor((tile - icon) / 2.0), floor((tile - icon) / 2.0), icon, icon);
+        y = CGRectGetMaxY(_pickedTile.frame) + 10;
+        _pickedName.frame = CGRectMake(10, y, textW, 20);
+        y += 24;
+        _pickedSubtitle.frame = CGRectMake(10, y, textW, subH);
+    }
 }
 
 @end
 
 #pragma mark - Preview screen
 
-static const CGFloat kSplitCarPlayTitleBarHeight = 26;
-
 @interface PreviewViewController : UIViewController <UIGestureRecognizerDelegate>
 @end
 
 @implementation PreviewViewController {
+    UILabel *_headingLabel;
     UIView *_carScreenFrame;
-    UIView *_leftPlaceholder;
-    UIView *_rightPlaceholder;
-    UIImageView *_leftIconView;
-    UIImageView *_rightIconView;
-    UILabel *_leftLabel;
-    UILabel *_rightLabel;
-    UIView *_leftTitleBar;
-    UIView *_rightTitleBar;
-    UIImageView *_leftTitleIcon;
-    UIImageView *_rightTitleIcon;
+    PreviewPaneView *_leftPane;
+    PreviewPaneView *_rightPane;
+    UIView *_dividerHandle;   // big invisible drag target
+    UIView *_dividerPill;     // the visible white "≡" pill inside it
+    UIButton *_edgeHandle;    // left-edge half-capsule, toggles the speed card
+    UIView *_edgeVisual;
+    UIImageView *_edgeChevron;
     PreviewBubbleView *_bubble;
     UISegmentedControl *_styleControl;
     UISegmentedControl *_positionControl;
-    UILabel *_headingLabel;
     UILabel *_captionLabel;
-    UIView *_dividerHandle;
     CGFloat _splitRatio;
     CGFloat _dragStartRatio;
-    BOOL _leftHasSnapshot;
-    BOOL _rightHasSnapshot;
     BOOL _bubbleWasAdjusted; // once the bubble's been dragged, stop re-centering it every layout pass
+    BOOL _bubbleHiddenLocally; // edge-handle toggle; preview only, never written to prefs
 
-    // "Tab mới" empty state (shown in a box until an app is picked for
-    // it) -- styled after SidePlay's own "Mô phỏng" screen.
-    UIView *_leftEmptyState;
-    UIView *_rightEmptyState;
-    BOOL _leftIsEmpty;
-    BOOL _rightIsEmpty;
+    // Looked up once per refresh (display-name lookup walks every
+    // installed app), reused by the "Gần đây" empty state on every layout
+    // pass -- including every frame of a divider drag.
+    NSArray<NSString *> *_recentIDs;
+    NSDictionary<NSString *, UIImage *> *_recentIcons;
+    NSDictionary<NSString *, NSString *> *_recentNames;
 }
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Mô phỏng";
     // Reference screenshots show a big bold heading directly on a white
-    // page, no visible nav bar -- not a thin standard nav-bar title on a
-    // dark background (how this screen looked before). Hides the nav
-    // bar for just this tab's own navigation controller and draws the
-    // heading as a real label instead.
+    // page, no visible nav bar. Hides the nav bar for just this tab's own
+    // navigation controller and draws the heading as a real label instead.
     self.view.backgroundColor = [UIColor whiteColor];
+    // Without this, batteryState stays Unknown and the card's battery row
+    // never shows (nothing else in this app turns monitoring on).
+    [UIDevice currentDevice].batteryMonitoringEnabled = YES;
 
     _headingLabel = [[UILabel alloc] init];
     _headingLabel.text = @"Mô phỏng";
@@ -556,69 +947,50 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _headingLabel.textColor = [UIColor blackColor];
     [self.view addSubview:_headingLabel];
 
-    // A single outer "car screen" frame wrapping both app boxes together
-    // -- represents the one physical CarPlay display being split in two,
-    // not two independent cards. Added behind the two boxes.
+    // One outer "car screen" frame wrapping both panes -- the one physical
+    // CarPlay display being split in two. Added behind the panes.
     _carScreenFrame = [[UIView alloc] init];
-    _carScreenFrame.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
-    _carScreenFrame.layer.cornerRadius = 14;
-    _carScreenFrame.layer.borderWidth = 1;
-    _carScreenFrame.layer.borderColor = [UIColor colorWithWhite:0.8 alpha:1].CGColor;
+    _carScreenFrame.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1];
+    _carScreenFrame.layer.cornerRadius = 16;
+    _carScreenFrame.layer.borderWidth = SCPHairline();
+    _carScreenFrame.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+    _carScreenFrame.layer.shadowColor = [UIColor blackColor].CGColor;
+    _carScreenFrame.layer.shadowOpacity = 0.06;
+    _carScreenFrame.layer.shadowRadius = 10;
+    _carScreenFrame.layer.shadowOffset = CGSizeMake(0, 3);
     [self.view addSubview:_carScreenFrame];
 
-    _leftPlaceholder = [self makePlaceholder];
-    _rightPlaceholder = [self makePlaceholder];
-    [self.view addSubview:_leftPlaceholder];
-    [self.view addSubview:_rightPlaceholder];
+    _leftPane = [self makePaneWithTag:1];
+    _rightPane = [self makePaneWithTag:2];
 
-    _leftIconView = [self makeIconView];
-    _rightIconView = [self makeIconView];
-    [_leftPlaceholder addSubview:_leftIconView];
-    [_rightPlaceholder addSubview:_rightIconView];
+    // Drag this to resize the split live -- same "splitRatio" pref the
+    // "Split Ratio" slider on the "Trên xe" tab controls, so either one
+    // moves the other. The visible pill is small; the clear container
+    // around it is the (much easier to grab) hit area.
+    _dividerHandle = [[UIView alloc] init];
+    _dividerHandle.backgroundColor = [UIColor clearColor];
+    _dividerHandle.userInteractionEnabled = YES;
+    [self.view addSubview:_dividerHandle];
 
-    // A fake "browser/app window" title bar (3 traffic-light dots + a
-    // small icon + the app name) on top of each box -- purely cosmetic,
-    // same idea SidePlay's own "Mô phỏng" screen uses on its two app
-    // mockups (confirmed from a screenshot: the YouTube side shows grey
-    // skeleton placeholders under that bar, not real video, so it's
-    // decoration there too, not a real window with working buttons).
-    _leftTitleBar = [self makeTitleBarWithDots];
-    _rightTitleBar = [self makeTitleBarWithDots];
-    [_leftPlaceholder addSubview:_leftTitleBar];
-    [_rightPlaceholder addSubview:_rightTitleBar];
-
-    _leftTitleIcon = [self makeTitleIconView];
-    _rightTitleIcon = [self makeTitleIconView];
-    [_leftTitleBar addSubview:_leftTitleIcon];
-    [_rightTitleBar addSubview:_rightTitleIcon];
-
-    _leftLabel = [self makeTitleBarLabel];
-    _rightLabel = [self makeTitleBarLabel];
-    [_leftTitleBar addSubview:_leftLabel];
-    [_rightTitleBar addSubview:_rightLabel];
-
-    // "Tab mới" empty state (SidePlay's own look for a box with nothing
-    // picked yet) -- populated dynamically in viewDidLayoutSubviews since
-    // its own layout needs the placeholder's final width.
-    _leftEmptyState = [[UIView alloc] init];
-    _rightEmptyState = [[UIView alloc] init];
-    [_leftPlaceholder addSubview:_leftEmptyState];
-    [_rightPlaceholder addSubview:_rightEmptyState];
-
-    // Tap a box to open the grid-style "Chọn app ô 1/2" picker (same
-    // whether it's empty or already showing an app -- lets you change
-    // the pick, not just make the first one). The gesture's delegate
-    // skips touches that land on a button inside the empty state (the
-    // recent-app icons / "Tất cả app" link) so they get their own tap
-    // instead of this one swallowing it.
-    UITapGestureRecognizer *leftTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(leftPlaceholderTapped)];
-    leftTap.delegate = self;
-    [_leftPlaceholder addGestureRecognizer:leftTap];
-    _leftPlaceholder.userInteractionEnabled = YES;
-    UITapGestureRecognizer *rightTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(rightPlaceholderTapped)];
-    rightTap.delegate = self;
-    [_rightPlaceholder addGestureRecognizer:rightTap];
-    _rightPlaceholder.userInteractionEnabled = YES;
+    _dividerPill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 56)];
+    _dividerPill.backgroundColor = [UIColor whiteColor];
+    _dividerPill.layer.cornerRadius = 5;
+    _dividerPill.layer.borderWidth = SCPHairline();
+    _dividerPill.layer.borderColor = [UIColor colorWithWhite:0.78 alpha:1].CGColor;
+    _dividerPill.layer.shadowColor = [UIColor blackColor].CGColor;
+    _dividerPill.layer.shadowOpacity = 0.15;
+    _dividerPill.layer.shadowRadius = 3;
+    _dividerPill.layer.shadowOffset = CGSizeMake(0, 1);
+    _dividerPill.userInteractionEnabled = NO;
+    for (NSInteger i = 0; i < 3; i++) { // "≡" grip
+        UIView *line = [[UIView alloc] initWithFrame:CGRectMake(3, 23 + i * 4, 4, 1)];
+        line.backgroundColor = [UIColor colorWithWhite:0.5 alpha:1];
+        line.layer.cornerRadius = 0.5;
+        [_dividerPill addSubview:line];
+    }
+    [_dividerHandle addSubview:_dividerPill];
+    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDividerPan:)];
+    [_dividerHandle addGestureRecognizer:pan];
 
     _styleControl = [[UISegmentedControl alloc] initWithItems:@[@"Card", @"Ring", @"Bar"]];
     NSDictionary *prefs = SCPCopyPrefs();
@@ -632,19 +1004,19 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     [self.view addSubview:_positionControl];
 
     _captionLabel = [[UILabel alloc] init];
-    _captionLabel.textColor = [UIColor colorWithWhite:0.4 alpha:1];
+    _captionLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = @"Khung bên trên chỉ là ảnh xem trước tĩnh (không bấm vào app được) — kéo thanh ở giữa để đổi tỉ lệ chia màn hình, đổi kiểu/vị trí bên dưới để xem ngay. Kéo bong bóng để đổi vị trí, chụm/mở 2 ngón để đổi kích thước.";
+    _captionLabel.text = @"Khung trên chỉ là ảnh chụp tĩnh lần cuối của từng app (không bấm vào app được). Kéo thanh ≡ ở giữa để đổi tỉ lệ chia; kéo thẻ tốc độ để di chuyển, chụm 2 ngón để đổi cỡ.";
     [self.view addSubview:_captionLabel];
 
     _bubble = [[PreviewBubbleView alloc] initWithFrame:CGRectZero];
     [self.view addSubview:_bubble];
     // Drag the bubble anywhere, pinch to resize it -- persists the scale
     // to the shared "bubbleScale" pref (also read by the real CarPlay
-    // bubble in Tweak.xm, once that feature works again) and stops this
-    // screen's own layout from re-centering it on every pass once moved.
+    // bubble in Tweak.xm) and stops this screen's own layout from
+    // re-centering it on every pass once moved.
     __weak typeof(self) weakSelf = self;
     _bubble.onUserAdjusted = ^{
         __strong typeof(weakSelf) strongSelf = weakSelf;
@@ -653,23 +1025,60 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
         SplitCarPlaySetPref(@"bubbleScale", @(strongSelf->_bubble.scale));
     };
 
-    // Drag this to resize the split live -- same "splitRatio" pref the
-    // "Split Ratio" slider on the "Trên xe" tab controls, so either one
-    // moves the other.
-    _dividerHandle = [[UIView alloc] init];
-    _dividerHandle.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
-    _dividerHandle.layer.cornerRadius = 3;
-    [self.view addSubview:_dividerHandle];
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDividerPan:)];
-    [_dividerHandle addGestureRecognizer:pan];
-    _dividerHandle.userInteractionEnabled = YES;
+    // Left-edge half-capsule: shows/hides the speed card in this preview.
+    // Added last so it stays tappable even when the card sits next to it.
+    _edgeHandle = [UIButton buttonWithType:UIButtonTypeCustom];
+    _edgeHandle.accessibilityLabel = @"Ẩn/hiện thẻ tốc độ";
+    [_edgeHandle addTarget:self action:@selector(edgeHandleTapped) forControlEvents:UIControlEventTouchUpInside];
+    _edgeVisual = [[UIView alloc] init];
+    _edgeVisual.userInteractionEnabled = NO;
+    _edgeVisual.backgroundColor = [UIColor whiteColor];
+    _edgeVisual.layer.cornerRadius = 8;
+    _edgeVisual.layer.maskedCorners = kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner;
+    _edgeVisual.layer.borderWidth = SCPHairline();
+    _edgeVisual.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+    _edgeVisual.layer.shadowColor = [UIColor blackColor].CGColor;
+    _edgeVisual.layer.shadowOpacity = 0.12;
+    _edgeVisual.layer.shadowRadius = 3;
+    _edgeVisual.layer.shadowOffset = CGSizeMake(1, 1);
+    [_edgeHandle addSubview:_edgeVisual];
+    _edgeChevron = [[UIImageView alloc] init];
+    _edgeChevron.userInteractionEnabled = NO;
+    _edgeChevron.contentMode = UIViewContentModeScaleAspectFit;
+    _edgeChevron.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
+    [_edgeVisual addSubview:_edgeChevron];
+    [self.view addSubview:_edgeHandle];
+    [self updateEdgeChevron];
 
     [self refresh];
 }
 
+- (PreviewPaneView *)makePaneWithTag:(NSInteger)tag {
+    PreviewPaneView *pane = [[PreviewPaneView alloc] initWithFrame:CGRectZero];
+    pane.tag = tag;
+    pane.tabControl.tag = tag;
+    pane.reloadButton.tag = tag;
+    pane.swapButton.tag = tag;
+    pane.closeButton.tag = tag;
+    [pane.tabControl addTarget:self action:@selector(paneTabTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [pane.reloadButton addTarget:self action:@selector(paneReloadTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [pane.swapButton addTarget:self action:@selector(paneSwapTapped:) forControlEvents:UIControlEventTouchUpInside];
+    [pane.closeButton addTarget:self action:@selector(paneCloseTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+    // Tapping anywhere else in the pane also opens the picker (same as
+    // before this restyle). The delegate lets taps on the pane's own
+    // controls -- tab, circle buttons, recent-app tiles, "Tất cả app" --
+    // reach those controls instead.
+    UITapGestureRecognizer *tap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(paneContentTapped:)];
+    tap.delegate = self;
+    [pane addGestureRecognizer:tap];
+    [self.view addSubview:pane];
+    return pane;
+}
+
 - (void)handleDividerPan:(UIPanGestureRecognizer *)gesture {
-    CGFloat dividerWidth = 4;
-    CGFloat usableWidth = self.view.bounds.size.width - 32 - dividerWidth;
+    CGFloat usableWidth = self.view.bounds.size.width - 32 - kSCPPaneGap;
+    if (usableWidth <= 0) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _dragStartRatio = _splitRatio > 0 ? _splitRatio : 0.5;
     }
@@ -690,188 +1099,117 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     [self refresh]; // picked app / live Vietmap data may have changed since last time
 }
 
-- (UIView *)makePlaceholder {
-    UIView *view = [[UIView alloc] init];
-    view.backgroundColor = [UIColor colorWithWhite:0.96 alpha:1];
-    view.layer.cornerRadius = 8;
-    view.layer.masksToBounds = YES; // keep the title bar's top corners and the snapshot's edges inside the rounded card
-    view.layer.borderWidth = 1;
-    view.layer.borderColor = [UIColor colorWithWhite:0.85 alpha:1].CGColor; // card definition against the white page, matching the reference screenshots' light theme
-    return view;
-}
-
-- (UIImageView *)makeIconView {
-    UIImageView *iconView = [[UIImageView alloc] init];
-    iconView.contentMode = UIViewContentModeScaleAspectFit;
-    iconView.layer.cornerRadius = 12;
-    iconView.layer.masksToBounds = YES;
-    return iconView;
-}
-
-- (UIView *)makeTitleBarWithDots {
-    UIView *bar = [[UIView alloc] init];
-    bar.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
-    NSArray<UIColor *> *dotColors = @[
-        [UIColor colorWithRed:1.0 green:0.37 blue:0.34 alpha:1],  // red
-        [UIColor colorWithRed:1.0 green:0.74 blue:0.18 alpha:1],  // yellow
-        [UIColor colorWithRed:0.2 green:0.78 blue:0.35 alpha:1],  // green
-    ];
-    CGFloat dotSize = 8, dotGap = 6, x = 8;
-    for (UIColor *color in dotColors) {
-        UIView *dot = [[UIView alloc] initWithFrame:CGRectMake(x, (kSplitCarPlayTitleBarHeight - dotSize) / 2.0, dotSize, dotSize)];
-        dot.backgroundColor = color;
-        dot.layer.cornerRadius = dotSize / 2.0;
-        [bar addSubview:dot];
-        x += dotSize + dotGap;
-    }
-    return bar;
-}
-
-- (UIImageView *)makeTitleIconView {
-    UIImageView *iconView = [[UIImageView alloc] init];
-    iconView.contentMode = UIViewContentModeScaleAspectFit;
-    iconView.layer.cornerRadius = 3;
-    iconView.layer.masksToBounds = YES;
-    return iconView;
-}
-
-- (UILabel *)makeTitleBarLabel {
-    UILabel *label = [[UILabel alloc] init];
-    label.textColor = [UIColor colorWithWhite:0.15 alpha:1];
-    label.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-    label.textAlignment = NSTextAlignmentLeft;
-    label.numberOfLines = 1;
-    label.lineBreakMode = NSLineBreakByTruncatingTail;
-    return label;
-}
-
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect bounds = self.view.bounds;
+    CGFloat side = 16;
+    CGFloat contentW = bounds.size.width - side * 2;
 
-    _headingLabel.frame = CGRectMake(16, self.view.safeAreaInsets.top + 8, bounds.size.width - 32, 42);
-    CGFloat topInset = CGRectGetMaxY(_headingLabel.frame) + 16;
-    CGFloat carScreenHeight = 220;
+    _headingLabel.frame = CGRectMake(side, self.view.safeAreaInsets.top + 8, contentW, 42);
+    CGFloat paneTop = CGRectGetMaxY(_headingLabel.frame) + 14;
 
-    CGFloat dividerWidth = 4;
-    CGFloat usableWidth = bounds.size.width - 32 - dividerWidth;
+    // Car screen height ~0.95 x width, but never so tall that the
+    // controls + caption below get pushed under the (floating) tab bar.
+    CGFloat captionH = MIN(64, ceil([_captionLabel sizeThatFits:CGSizeMake(contentW, CGFLOAT_MAX)].height));
+    CGFloat controlsBlockH = 18 + 32 + 10 + 32 + 10 + captionH + 8;
+    CGFloat maxCarH = bounds.size.height - self.view.safeAreaInsets.bottom - paneTop - controlsBlockH;
+    CGFloat carH = floor(MIN(contentW * 0.95, maxCarH));
+    carH = MAX(carH, 200);
+
+    CGFloat usableWidth = contentW - kSCPPaneGap;
     CGFloat ratio = _splitRatio > 0 ? _splitRatio : 0.5;
     CGFloat leftWidth = floor(usableWidth * ratio);
     CGFloat rightWidth = usableWidth - leftWidth;
-    _leftPlaceholder.frame = CGRectMake(16, topInset, leftWidth, carScreenHeight);
-    _rightPlaceholder.frame = CGRectMake(CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth, topInset, rightWidth, carScreenHeight);
+    _leftPane.frame = CGRectMake(side, paneTop, leftWidth, carH);
+    _rightPane.frame = CGRectMake(CGRectGetMaxX(_leftPane.frame) + kSCPPaneGap, paneTop, rightWidth, carH);
+    [_leftPane layoutIfNeeded];
+    [_rightPane layoutIfNeeded];
+    [self populateEmptyStateIfNeeded:_leftPane isLeft:YES];
+    [self populateEmptyStateIfNeeded:_rightPane isLeft:NO];
 
-    CGFloat framePad = 6;
-    _carScreenFrame.frame = CGRectInset(CGRectUnion(_leftPlaceholder.frame, _rightPlaceholder.frame), -framePad, -framePad);
+    _carScreenFrame.frame = CGRectInset(CGRectUnion(_leftPane.frame, _rightPane.frame), -kSCPCarFramePad, -kSCPCarFramePad);
+    _carScreenFrame.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_carScreenFrame.bounds cornerRadius:16].CGPath;
 
-    // A wider invisible hit area than the thin visible line, centered on
-    // the boundary between the two placeholders, so it's actually easy
-    // to grab with a finger.
-    CGFloat handleHitWidth = 28, handleVisibleWidth = 5, handleHeight = 64;
-    CGFloat boundaryX = CGRectGetMaxX(_leftPlaceholder.frame) + dividerWidth / 2.0;
-    _dividerHandle.frame = CGRectMake(boundaryX - handleHitWidth / 2.0,
-                                       topInset + (carScreenHeight - handleHeight) / 2.0,
-                                       handleHitWidth, handleHeight);
-    _dividerHandle.layer.cornerRadius = handleVisibleWidth / 2.0;
-    // Only the thin center strip is drawn; the rest of the frame is
-    // just a bigger invisible tap/drag target.
-    CGRect visibleRect = CGRectMake((handleHitWidth - handleVisibleWidth) / 2.0, 0, handleVisibleWidth, handleHeight);
-    CAShapeLayer *mask = [CAShapeLayer layer];
-    mask.path = [UIBezierPath bezierPathWithRoundedRect:visibleRect cornerRadius:handleVisibleWidth / 2.0].CGPath;
-    _dividerHandle.layer.mask = mask;
+    // Divider: 28x80 invisible hit area centered on the gap, white pill inside.
+    CGFloat hitW = 28, hitH = 80;
+    CGFloat boundaryX = CGRectGetMaxX(_leftPane.frame) + kSCPPaneGap / 2.0;
+    _dividerHandle.frame = CGRectMake(boundaryX - hitW / 2.0, paneTop + floor((carH - hitH) / 2.0), hitW, hitH);
+    _dividerPill.frame = CGRectMake((hitW - 10) / 2.0, (hitH - 56) / 2.0, 10, 56);
+    _dividerPill.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_dividerPill.bounds cornerRadius:5].CGPath;
 
-    // Real SidePlay screenshots show this title bar only while a box is
-    // still empty/loading (picking an app, "Đang mở...") -- once real
-    // content is actually showing, it disappears and the content fills
-    // the box edge-to-edge with no notch at the top. Matches that: hide
-    // the bar (and let the snapshot take the full height) exactly when
-    // we have a real snapshot to show.
-    _leftTitleBar.hidden = _leftHasSnapshot;
-    _rightTitleBar.hidden = _rightHasSnapshot;
-    _leftTitleBar.frame = CGRectMake(0, 0, _leftPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
-    _rightTitleBar.frame = CGRectMake(0, 0, _rightPlaceholder.bounds.size.width, kSplitCarPlayTitleBarHeight);
-    [self layoutTitleBar:_leftTitleBar icon:_leftTitleIcon label:_leftLabel];
-    [self layoutTitleBar:_rightTitleBar icon:_rightTitleIcon label:_rightLabel];
+    // Edge handle hugs the car frame's left edge, just under the title bars.
+    CGFloat edgeVisualW = 14, edgeH = 84;
+    _edgeHandle.frame = CGRectMake(CGRectGetMinX(_carScreenFrame.frame), paneTop + kSCPPaneBarHeight + 14, edgeVisualW + 10, edgeH);
+    _edgeVisual.frame = CGRectMake(0, 0, edgeVisualW, edgeH);
+    _edgeChevron.frame = CGRectMake(floor((edgeVisualW - 9) / 2.0), floor((edgeH - 12) / 2.0), 9, 12);
 
-    // A real snapshot fills the whole box now that the title bar above
-    // is hidden; falling back to the plain icon centers it in the area
-    // below the (still visible) title bar.
-    [self layoutAppBox:_leftPlaceholder icon:_leftIconView hasSnapshot:_leftHasSnapshot];
-    [self layoutAppBox:_rightPlaceholder icon:_rightIconView hasSnapshot:_rightHasSnapshot];
-
-    _leftEmptyState.frame = CGRectMake(0, kSplitCarPlayTitleBarHeight,
-                                        _leftPlaceholder.bounds.size.width,
-                                        _leftPlaceholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
-    _rightEmptyState.frame = CGRectMake(0, kSplitCarPlayTitleBarHeight,
-                                         _rightPlaceholder.bounds.size.width,
-                                         _rightPlaceholder.bounds.size.height - kSplitCarPlayTitleBarHeight);
-    [self populateEmptyState:_leftEmptyState isLeft:YES];
-    [self populateEmptyState:_rightEmptyState isLeft:NO];
-    _leftEmptyState.hidden = !_leftIsEmpty;
-    _rightEmptyState.hidden = !_rightIsEmpty;
-    _leftIconView.hidden = _leftIsEmpty;
-    _rightIconView.hidden = _rightIsEmpty;
-
-    CGFloat bubbleW = 116, bubbleH = 266;
+    CGFloat bubbleW = 96, bubbleH = 196;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
         case SplitCarPlayBubbleStyleRing: bubbleW = bubbleH = 100; break;
         case SplitCarPlayBubbleStyleBar: bubbleW = 220; bubbleH = 44; break;
         default: break;
     }
     // Uses bounds+center, not .frame: the bubble carries a pinch-driven
-    // scale transform now, and -frame is undefined (per Apple's docs)
-    // once a view's transform isn't the identity transform.
+    // scale transform, and -frame is undefined (per Apple's docs) once a
+    // view's transform isn't the identity transform.
     _bubble.bounds = CGRectMake(0, 0, bubbleW, bubbleH);
     if (!_bubbleWasAdjusted) {
         BOOL bubbleOnLeft = _positionControl.selectedSegmentIndex == 0;
-        CGFloat bubbleX = bubbleOnLeft ? CGRectGetMinX(_leftPlaceholder.frame) + 8
-                                        : CGRectGetMaxX(_rightPlaceholder.frame) - bubbleW - 8;
-        _bubble.center = CGPointMake(bubbleX + bubbleW / 2.0, topInset + 8 + bubbleH / 2.0);
+        CGFloat bubbleX = bubbleOnLeft ? CGRectGetMinX(_leftPane.frame) + 8
+                                        : CGRectGetMaxX(_rightPane.frame) - bubbleW - 8;
+        _bubble.center = CGPointMake(bubbleX + bubbleW / 2.0, paneTop + kSCPPaneBarHeight + 8 + bubbleH / 2.0);
     }
 
-    _styleControl.frame = CGRectMake(16, CGRectGetMaxY(_leftPlaceholder.frame) + 20, bounds.size.width - 32, 32);
-    _positionControl.frame = CGRectMake(16, CGRectGetMaxY(_styleControl.frame) + 12, bounds.size.width - 32, 32);
-    _captionLabel.frame = CGRectMake(16, CGRectGetMaxY(_positionControl.frame) + 12, bounds.size.width - 32, 60);
+    _styleControl.frame = CGRectMake(side, CGRectGetMaxY(_leftPane.frame) + 18, contentW, 32);
+    _positionControl.frame = CGRectMake(side, CGRectGetMaxY(_styleControl.frame) + 10, contentW, 32);
+    _captionLabel.frame = CGRectMake(side, CGRectGetMaxY(_positionControl.frame) + 10, contentW, captionH);
 }
 
-- (void)layoutTitleBar:(UIView *)bar icon:(UIImageView *)icon label:(UILabel *)label {
-    CGFloat dotsEndX = 8 + 3 * 8 + 2 * 6; // matches makeTitleBarWithDots's dotSize/dotGap/start-x
-    CGFloat iconSize = 14;
-    CGFloat iconX = dotsEndX + 10;
-    icon.frame = CGRectMake(iconX, (kSplitCarPlayTitleBarHeight - iconSize) / 2.0, iconSize, iconSize);
-    CGFloat labelX = CGRectGetMaxX(icon.frame) + 6;
-    CGFloat labelWidth = MAX(0, bar.bounds.size.width - labelX - 10);
-    label.frame = CGRectMake(labelX, 0, labelWidth, kSplitCarPlayTitleBarHeight);
-}
-
-- (void)layoutAppBox:(UIView *)placeholder icon:(UIImageView *)icon hasSnapshot:(BOOL)hasSnapshot {
-    // The title bar is hidden whenever hasSnapshot is YES (see
-    // viewDidLayoutSubviews), so the content area only needs to leave
-    // room for it while showing the icon fallback.
-    CGFloat topOffset = hasSnapshot ? 0 : kSplitCarPlayTitleBarHeight;
-    CGRect contentArea = CGRectMake(0, topOffset,
-                                     placeholder.bounds.size.width,
-                                     placeholder.bounds.size.height - topOffset);
-    icon.layer.cornerRadius = hasSnapshot ? 0 : 12;
-    if (hasSnapshot) {
-        icon.frame = contentArea; // fill the box edge-to-edge, like a real screenshot
-    } else {
-        CGFloat iconSize = MIN(56, contentArea.size.width - 24);
-        icon.frame = CGRectMake(CGRectGetMinX(contentArea) + (contentArea.size.width - iconSize) / 2.0,
-                                 CGRectGetMinY(contentArea) + (contentArea.size.height - iconSize) / 2.0,
-                                 iconSize, iconSize);
+- (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
+    // Let a tap that lands on (or inside) one of the pane's own controls
+    // handle itself instead of this whole-pane tap swallowing it first.
+    for (UIView *view = touch.view; view && view != gestureRecognizer.view; view = view.superview) {
+        if ([view isKindOfClass:[UIControl class]]) return NO;
     }
+    return YES;
 }
 
-- (BOOL)gestureRecognizer:(UITapGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
-    // Let a tap that lands on one of the empty state's own buttons (a
-    // recent-app icon, "Tất cả app") handle itself instead of this
-    // whole-box tap swallowing it first.
-    return ![touch.view isKindOfClass:[UIControl class]];
+#pragma mark - Pane actions
+
+- (void)paneTabTapped:(UIControl *)sender { [self showAppPickerForLeftSide:(sender.tag == 1)]; }
+
+- (void)paneContentTapped:(UITapGestureRecognizer *)gesture { [self showAppPickerForLeftSide:(gesture.view.tag == 1)]; }
+
+// Green: re-read the snapshot (e.g. after opening that app once).
+- (void)paneReloadTapped:(UIButton *)sender { [self refresh]; }
+
+// Yellow: swap the two panes' apps.
+- (void)paneSwapTapped:(UIButton *)sender {
+    NSDictionary *prefs = SCPCopyPrefs();
+    NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
+    NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
+    SplitCarPlaySetPref(@"leftBundleID", rightID);
+    SplitCarPlaySetPref(@"rightBundleID", leftID);
+    [self refresh];
 }
 
-- (void)leftPlaceholderTapped { [self showAppPickerForLeftSide:YES]; }
-- (void)rightPlaceholderTapped { [self showAppPickerForLeftSide:NO]; }
+// Red: clear this pane back to "Tab mới".
+- (void)paneCloseTapped:(UIButton *)sender {
+    SplitCarPlaySetPref(sender.tag == 1 ? @"leftBundleID" : @"rightBundleID", @"");
+    [self refresh];
+}
+
+- (void)edgeHandleTapped {
+    _bubbleHiddenLocally = !_bubbleHiddenLocally;
+    _bubble.hidden = _bubbleHiddenLocally;
+    [self updateEdgeChevron];
+}
+
+// "›" = pull the card out (currently hidden), "‹" = tuck it away.
+- (void)updateEdgeChevron {
+    NSString *name = _bubbleHiddenLocally ? @"chevron.right" : @"chevron.left";
+    _edgeChevron.image = [SCPSymbol(name, 10, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+}
 
 - (void)showAppPickerForLeftSide:(BOOL)isLeft {
     [AppPickerController presentFrom:self
@@ -884,50 +1222,75 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 
 #pragma mark - "Tab mới" empty state
 
-- (void)populateEmptyState:(UIView *)emptyState isLeft:(BOOL)isLeft {
-    for (UIView *subview in emptyState.subviews) [subview removeFromSuperview];
-    if (emptyState.bounds.size.width <= 0) return;
+- (void)populateEmptyStateIfNeeded:(PreviewPaneView *)pane isLeft:(BOOL)isLeft {
+    if (!pane.isEmpty) return;
+    UIView *emptyState = pane.emptyState;
+    CGSize size = emptyState.bounds.size;
+    if (size.width <= 0 || size.height <= 0) return;
+    if (CGSizeEqualToSize(pane.emptyStateBuiltSize, size)) return;
+    pane.emptyStateBuiltSize = size;
 
-    UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(10, 8, emptyState.bounds.size.width - 20, 14)];
-    header.text = @"Gần đây";
-    header.font = [UIFont systemFontOfSize:10 weight:UIFontWeightSemibold];
-    header.textColor = [UIColor colorWithWhite:0.5 alpha:1];
-    [emptyState addSubview:header];
+    for (UIView *subview in [emptyState.subviews copy]) [subview removeFromSuperview];
 
-    CGFloat itemW = 52, x = 10, y = 26;
-    for (NSString *bundleID in SplitCarPlayRecentBundleIDs()) {
-        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
-        button.frame = CGRectMake(x, y, itemW, 56);
-        button.accessibilityIdentifier = bundleID;
-        button.tag = isLeft ? 1 : 2;
-        [button addTarget:self action:@selector(emptyStateRecentTapped:) forControlEvents:UIControlEventTouchUpInside];
+    CGFloat w = size.width, h = size.height;
+    CGFloat tile = 52, gap = 10, sidePad = 12;
+    NSInteger fit = (NSInteger)floor((w - sidePad * 2 + gap) / (tile + gap));
+    NSInteger count = MIN((NSInteger)_recentIDs.count, MAX((NSInteger)0, fit));
+    CGFloat blockH = (count > 0 ? (16 + 8 + tile + 4 + 13 + 18) : 0) + 20;
+    CGFloat y = MAX(12, floor((h - blockH) * 0.38)); // upper-middle, like the reference
 
-        UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake((itemW - 36) / 2.0, 0, 36, 36)];
-        icon.image = SplitCarPlayAppIcon(bundleID);
-        icon.layer.cornerRadius = 8;
-        icon.layer.masksToBounds = YES;
-        icon.userInteractionEnabled = NO;
-        [button addSubview:icon];
+    if (count > 0) {
+        CGFloat groupW = count * tile + (count - 1) * gap;
+        CGFloat x0 = floor((w - groupW) / 2.0);
 
-        UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(0, 38, itemW, 14)];
-        label.text = SplitCarPlayDisplayNameForBundleID(bundleID);
-        label.font = [UIFont systemFontOfSize:9];
-        label.textColor = [UIColor colorWithWhite:0.15 alpha:1];
-        label.textAlignment = NSTextAlignmentCenter;
-        label.userInteractionEnabled = NO;
-        [button addSubview:label];
+        UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(x0, y, MAX(0, w - x0 - sidePad), 16)];
+        header.text = @"Gần đây";
+        header.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
+        header.textColor = [UIColor colorWithWhite:0.25 alpha:1];
+        [emptyState addSubview:header];
+        y += 24;
 
-        [emptyState addSubview:button];
-        x += itemW + 8;
-        if (x + itemW > emptyState.bounds.size.width) break; // only as many as fit on one row
+        for (NSInteger i = 0; i < count; i++) {
+            NSString *bundleID = _recentIDs[i];
+            CGFloat x = x0 + i * (tile + gap);
+            UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+            button.frame = CGRectMake(x, y, tile, tile);
+            button.backgroundColor = [UIColor colorWithWhite:0.93 alpha:1];
+            button.layer.cornerRadius = 12;
+            button.accessibilityIdentifier = bundleID;
+            button.accessibilityLabel = _recentNames[bundleID];
+            button.tag = isLeft ? 1 : 2;
+            [button addTarget:self action:@selector(emptyStateRecentTapped:) forControlEvents:UIControlEventTouchUpInside];
+
+            CGFloat iconSize = 42;
+            UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake((tile - iconSize) / 2.0, (tile - iconSize) / 2.0, iconSize, iconSize)];
+            icon.image = _recentIcons[bundleID];
+            icon.contentMode = UIViewContentModeScaleAspectFit;
+            icon.layer.cornerRadius = 10;
+            icon.layer.masksToBounds = YES;
+            icon.userInteractionEnabled = NO;
+            [button addSubview:icon];
+            [emptyState addSubview:button];
+
+            UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(x - 4, y + tile + 4, tile + 8, 13)];
+            label.text = _recentNames[bundleID] ?: bundleID;
+            label.font = [UIFont systemFontOfSize:10];
+            label.textColor = [UIColor colorWithWhite:0.3 alpha:1];
+            label.textAlignment = NSTextAlignmentCenter;
+            label.lineBreakMode = NSLineBreakByTruncatingTail;
+            [emptyState addSubview:label];
+        }
+        y += tile + 4 + 13 + 18;
     }
 
     UIButton *allAppsButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [allAppsButton setTitle:@"Tất cả app >" forState:UIControlStateNormal];
-    allAppsButton.titleLabel.font = [UIFont systemFontOfSize:11];
-    allAppsButton.tintColor = [UIColor colorWithRed:0.35 green:0.62 blue:1 alpha:1];
-    allAppsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentLeft;
-    allAppsButton.frame = CGRectMake(10, y + 64, emptyState.bounds.size.width - 20, 18);
+    [allAppsButton setTitle:@"Tất cả app ›" forState:UIControlStateNormal];
+    allAppsButton.titleLabel.font = [UIFont systemFontOfSize:13 weight:UIFontWeightMedium];
+    allAppsButton.titleLabel.adjustsFontSizeToFitWidth = YES;
+    allAppsButton.titleLabel.minimumScaleFactor = 0.7;
+    allAppsButton.tintColor = [UIColor systemBlueColor];
+    allAppsButton.contentHorizontalAlignment = UIControlContentHorizontalAlignmentCenter;
+    allAppsButton.frame = CGRectMake(6, y, MAX(0, w - 12), 22);
     allAppsButton.tag = isLeft ? 1 : 2;
     [allAppsButton addTarget:self action:@selector(emptyStateAllAppsTapped:) forControlEvents:UIControlEventTouchUpInside];
     [emptyState addSubview:allAppsButton];
@@ -957,41 +1320,64 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     [self.view setNeedsLayout];
 }
 
+#pragma mark - Refresh
+
+- (void)configurePane:(PreviewPaneView *)pane bundleID:(NSString *)bundleID names:(NSDictionary *)names icons:(NSDictionary *)icons {
+    BOOL empty = bundleID.length == 0;
+    if (empty) {
+        [pane showEmpty];
+    } else {
+        // Prefer a real cached app-switcher snapshot (looks like the actual
+        // app) over the icon tile -- see this file's header comment. Either
+        // can be nil (app never backgrounded yet, wrong path guess, decode
+        // failure) with no crash either way.
+        [pane showAppNamed:(names[bundleID] ?: bundleID)
+                      icon:icons[bundleID]
+                  snapshot:SplitCarPlayAppSnapshot(bundleID)];
+    }
+
+    UIColor *offFill = [UIColor colorWithWhite:0.85 alpha:1];
+    UIColor *offGlyph = [UIColor colorWithWhite:0.62 alpha:1];
+    UIColor *greenFill = [UIColor colorWithRed:0.30 green:0.80 blue:0.40 alpha:1];
+    UIColor *greenGlyph = [UIColor colorWithRed:0.05 green:0.40 blue:0.14 alpha:1];
+    UIColor *yellowFill = [UIColor colorWithRed:1.00 green:0.78 blue:0.20 alpha:1];
+    UIColor *yellowGlyph = [UIColor colorWithRed:0.55 green:0.36 blue:0.00 alpha:1];
+    UIColor *redFill = [UIColor colorWithRed:1.00 green:0.38 blue:0.36 alpha:1];
+    UIColor *redGlyph = [UIColor colorWithRed:0.55 green:0.06 blue:0.06 alpha:1];
+    SCPStyleCircleButton(pane.reloadButton, empty ? offFill : greenFill, empty ? offGlyph : greenGlyph, !empty);
+    SCPStyleCircleButton(pane.swapButton, yellowFill, yellowGlyph, YES);
+    SCPStyleCircleButton(pane.closeButton, empty ? offFill : redFill, empty ? offGlyph : redGlyph, !empty);
+    pane.emptyStateBuiltSize = CGSizeZero; // recents may have changed -- rebuild on next layout
+}
+
 - (void)refresh {
     NSDictionary *prefs = SCPCopyPrefs();
-    NSString *leftID = prefs[@"leftBundleID"];
-    NSString *rightID = prefs[@"rightBundleID"];
-    _leftIsEmpty = leftID.length == 0;
-    _rightIsEmpty = rightID.length == 0;
+    NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
+    NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
 
-    // "+ Tab mới" in the title bar, same as an empty browser tab, when
-    // nothing's picked yet for that box -- the "Gần đây"/"Tất cả app"
-    // empty state below fills the rest (see populateEmptyState:isLeft:).
-    _leftLabel.text = _leftIsEmpty ? @"+  Tab mới" : (SplitCarPlayDisplayNameForBundleID(leftID) ?: leftID);
-    _rightLabel.text = _rightIsEmpty ? @"+  Tab mới" : (SplitCarPlayDisplayNameForBundleID(rightID) ?: rightID);
-    _leftTitleIcon.image = _leftIsEmpty ? nil : SplitCarPlayAppIcon(leftID);
-    _rightTitleIcon.image = _rightIsEmpty ? nil : SplitCarPlayAppIcon(rightID);
+    // One name/icon lookup per distinct app, shared by both panes and the
+    // "Gần đây" rows.
+    NSArray<NSString *> *recent = SplitCarPlayRecentBundleIDs();
+    NSMutableArray<NSString *> *needed = [NSMutableArray new];
+    for (NSString *bundleID in [@[leftID, rightID] arrayByAddingObjectsFromArray:recent]) {
+        if (bundleID.length > 0 && ![needed containsObject:bundleID]) [needed addObject:bundleID];
+    }
+    NSMutableDictionary<NSString *, NSString *> *names = [NSMutableDictionary new];
+    NSMutableDictionary<NSString *, UIImage *> *icons = [NSMutableDictionary new];
+    for (NSString *bundleID in needed) {
+        names[bundleID] = SplitCarPlayDisplayNameForBundleID(bundleID) ?: bundleID;
+        UIImage *icon = SplitCarPlayAppIcon(bundleID);
+        if (icon) icons[bundleID] = icon;
+    }
+    _recentIDs = recent;
+    _recentNames = names;
+    _recentIcons = icons;
 
-    // Prefer a real cached app-switcher snapshot (looks like the actual
-    // app) over the plain icon -- see this file's header comment. Either
-    // can be nil (app never backgrounded yet, wrong path guess, decode
-    // failure, nothing picked) with no crash either way.
-    UIImage *leftSnapshot = SplitCarPlayAppSnapshot(leftID);
-    UIImage *rightSnapshot = SplitCarPlayAppSnapshot(rightID);
-    _leftHasSnapshot = leftSnapshot != nil;
-    _rightHasSnapshot = rightSnapshot != nil;
-    _leftIconView.image = leftSnapshot ?: SplitCarPlayAppIcon(leftID);
-    _rightIconView.image = rightSnapshot ?: SplitCarPlayAppIcon(rightID);
-    _leftIconView.contentMode = _leftHasSnapshot ? UIViewContentModeScaleAspectFill : UIViewContentModeScaleAspectFit;
-    _rightIconView.contentMode = _rightHasSnapshot ? UIViewContentModeScaleAspectFill : UIViewContentModeScaleAspectFit;
+    [self configurePane:_leftPane bundleID:leftID names:names icons:icons];
+    [self configurePane:_rightPane bundleID:rightID names:names icons:icons];
 
     // Match Tweak.xm's loadPreferences defaults for anything the user
-    // hasn't touched yet in "Trên xe" -- an untouched row shows its
-    // "default" on-screen but doesn't necessarily write that value into
-    // this plist file until actually changed, so reading the file
-    // directly (as this whole controller does, for simplicity) needs the
-    // same fallback or this preview can show a different starting value
-    // than what the real CarPlay bubble would actually use.
+    // hasn't touched yet in "Trên xe".
     _bubble.style = (SplitCarPlayBubbleStyle)[prefs[@"bubbleStyle"] integerValue];
     _bubble.showDate = prefs[@"showDate"] ? [prefs[@"showDate"] boolValue] : YES;
     _bubble.showBattery = prefs[@"showBattery"] ? [prefs[@"showBattery"] boolValue] : YES;
