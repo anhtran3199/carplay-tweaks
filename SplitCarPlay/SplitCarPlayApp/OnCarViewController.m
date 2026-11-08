@@ -214,13 +214,14 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
         case SCPRowKindAction:
             if (row.action) row.action(self);
             break;
-        case SCPRowKindApp:
+        case SCPRowKindApp: {
             [AppPickerController presentFrom:self title:row.label onPick:^(NSString *bundleID) {
                 SplitCarPlaySetPref(row.key, bundleID);
                 if (row.afterChange) row.afterChange(bundleID);
                 [weakSelf.tableView reloadData];
             }];
             break;
+        }
         case SCPRowKindChoice: {
             UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row.label message:nil preferredStyle:UIAlertControllerStyleActionSheet];
             [row.options enumerateObjectsUsingBlock:^(NSString *option, NSUInteger index, BOOL *stop) {
