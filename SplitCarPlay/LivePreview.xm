@@ -67,8 +67,7 @@ void SCPHostAppendLog(NSString *line) {
                 handle = [NSFileHandle fileHandleForWritingAtPath:path];
                 [handle seekToEndOfFile];
             }
-            NSString *stamped = [NSString stringWithFormat:@"[%@] %@
-", [formatter stringFromDate:now], line];
+            NSString *stamped = [NSString stringWithFormat:@"[%@] %@\n", [formatter stringFromDate:now], line];
             [handle writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
         } @catch (NSException *exception) {
             handle = nil; // reopen next time (file deleted from the app, etc.)
