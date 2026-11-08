@@ -728,6 +728,23 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 //  methods for that), and whether the scenes stay foreground while the
 //  phone is locked.
 
+// App icon as SpringBoard draws it (same private UIImage method the app uses).
+static UIImage *SplitCarPlayIconForBundleID(NSString *bundleID) {
+    SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
+    if (bundleID.length == 0 || ![UIImage respondsToSelector:sel]) return nil;
+    return ((UIImage * (*)(id, SEL, NSString *, int, CGFloat))objc_msgSend)([UIImage class], sel, bundleID, 0, [UIScreen mainScreen].scale);
+}
+
+// "Tự làm tối màn hình": the brightness before dimming is kept in prefs,
+// so it comes back even after a SpringBoard restart.
+static void SplitCarPlayRestoreBrightness(void) {
+    id saved = SCPCopyPrefs()[@"dimSavedBrightness"];
+    if (!saved) return;
+    [UIScreen mainScreen].brightness = [saved floatValue];
+    SCPSetPref(@"dimSavedBrightness", nil);
+    SplitCarPlayHostingLog(@"[car] brightness restored to %.2f", [saved floatValue]);
+}
+
 @interface SplitCarPlayCarSlot : NSObject
 @property (nonatomic, copy) NSString *bundleID;
 @property (nonatomic, strong) UIView *container;
@@ -764,6 +781,16 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 @property (nonatomic, assign) BOOL dismissedUntilReconnect; // ✕ / watchdog: no auto start until the car reconnects
 @property (nonatomic, assign) BOOL lastAutoHost;
 @property (nonatomic, assign) BOOL sessionFromAutoHost;
+// Thanh tab ứng dụng (top of the car screen)
+@property (nonatomic, strong) UIView *appBar;
+@property (nonatomic, strong) UIScrollView *appBarIcons;
+@property (nonatomic, strong) UIButton *swapButton;
+@property (nonatomic, strong) UIButton *appBarHandle;
+@property (nonatomic, strong) NSTimer *appBarHideTimer;
+@property (nonatomic, assign) NSInteger appBarAutoHide; // seconds, 0 = always shown
+@property (nonatomic, copy) NSArray<NSString *> *carApps;
+@property (nonatomic, assign) BOOL showDivider;
+@property (nonatomic, assign) BOOL autoDimPhone;
 - (void)publishCarPlayState;
 @property (nonatomic, assign) NSUInteger sessionGeneration; // invalidates pending callbacks after teardown
 @property (nonatomic, strong) UIButton *carCloseButton;
@@ -833,10 +860,23 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         SCPSetHostingSessionActive(YES);       // CarPlayEnableHook reads this
         BOOL phonePreviewWasRunning = SCPHostSetCarPlaySessionActive(YES); // closes the phone preview, blocks it meanwhile
         self.hostDelay = phonePreviewWasRunning ? 3.0 : 0.0; // let the phone preview let go of the apps first
-        double ratio = [prefs[@"splitRatio"] doubleValue];
+        // "Mở lại bố cục lần cuối": the apps/split last shown on the car,
+        // otherwise "Mở nhanh" (Ô 1, Ô 2, 1 app or split).
+        NSMutableDictionary *layout = [prefs mutableCopy];
+        NSString *lastLeft = prefs[@"carLastLeftBundleID"];
+        BOOL restore = [prefs[@"restoreLastLayout"] boolValue] && [lastLeft isKindOfClass:[NSString class]] && lastLeft.length > 0;
+        if (restore) {
+            layout[@"leftBundleID"] = lastLeft;
+            layout[@"rightBundleID"] = prefs[@"carLastRightBundleID"] ?: @"";
+            layout[@"experimentalSingleApp"] = prefs[@"carLastSingle"] ?: @NO;
+            if (prefs[@"carLastSplitRatio"]) layout[@"splitRatio"] = prefs[@"carLastSplitRatio"];
+        }
+        SplitCarPlayHostingLog(@"[car] layout: %@", restore ? @"last one used on the car" : @"Mở nhanh");
+        double ratio = [layout[@"splitRatio"] doubleValue];
         self.splitRatio = (ratio > 0) ? MAX(0.2, MIN(0.8, ratio)) : 0.5;
-        self.singleAppMode = [prefs[@"experimentalSingleApp"] boolValue];
-        [self startSessionOnDisplay:carPlayDisplay prefs:prefs];
+        self.singleAppMode = [layout[@"experimentalSingleApp"] boolValue];
+        [self readCarPrefs:prefs];
+        [self startSessionOnDisplay:carPlayDisplay prefs:layout];
         if (!self.rootWindow) {
             SCPSetHostingSessionActive(NO);
             SCPHostSetCarPlaySessionActive(NO);
@@ -845,10 +885,30 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
             return;
         }
         self.hostingSessionActive = YES;
+        [self saveLastLayout];
     }
 
-    self.dividerView.hidden = self.singleAppMode || ![prefs[@"showDivider"] boolValue];
+    [self readCarPrefs:prefs];
+    self.dividerView.hidden = self.slots.count < 2 || !self.showDivider;
+    [self reloadAppBarIcons];
     [self applyBubblePrefs:prefs];
+}
+
+- (void)readCarPrefs:(NSDictionary *)prefs {
+    self.appBarAutoHide = prefs[@"appBarAutoHide"] ? [prefs[@"appBarAutoHide"] integerValue] : 5;
+    NSArray *apps = prefs[@"carApps"];
+    self.carApps = [apps isKindOfClass:[NSArray class]] ? apps : @[];
+    self.showDivider = prefs[@"showDivider"] ? [prefs[@"showDivider"] boolValue] : YES;
+    self.autoDimPhone = [prefs[@"autoDimPhone"] boolValue];
+}
+
+// What "Mở lại bố cục lần cuối" reopens next time.
+- (void)saveLastLayout {
+    if (self.slots.count == 0) return;
+    SplitCarPlayWritePref(@"carLastLeftBundleID", self.slots[0].bundleID ?: @"");
+    SplitCarPlayWritePref(@"carLastRightBundleID", self.slots.count > 1 ? (self.slots[1].bundleID ?: @"") : @"");
+    SplitCarPlayWritePref(@"carLastSingle", @(self.slots.count < 2));
+    SplitCarPlayWritePref(@"carLastSplitRatio", @(self.splitRatio));
 }
 
 - (void)applyBubblePrefs:(NSDictionary *)prefs {
@@ -930,17 +990,9 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         };
         [self.rootWindow addSubview:self.speedBubble];
 
-        // Always-available way out on the car screen: ✕ and a two-finger
-        // long press. Both give the normal CarPlay UI back.
-        self.carCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
-        [self.carCloseButton setTitle:@"✕" forState:UIControlStateNormal];
-        self.carCloseButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
-        self.carCloseButton.tintColor = [UIColor whiteColor];
-        self.carCloseButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-        self.carCloseButton.layer.cornerRadius = 22;
-        self.carCloseButton.frame = CGRectMake(12, 12, 44, 44);
-        [self.carCloseButton addTarget:self action:@selector(closeFromCar) forControlEvents:UIControlEventTouchUpInside];
-        [self.rootWindow addSubview:self.carCloseButton];
+        // Way out on the car screen: ✕ on the app bar, and a two-finger
+        // long press anywhere. Both give the normal CarPlay UI back.
+        [self buildAppBar];
 
         UILongPressGestureRecognizer *escape = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleEscapeGesture:)];
         escape.numberOfTouchesRequired = 2;
@@ -1020,6 +1072,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     [self layoutContainers]; // views follow right away (scaled)
     if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
         SplitCarPlayWritePref(@"splitRatio", @(self.splitRatio));
+        [self saveLastLayout];
         for (SplitCarPlayCarSlot *slot in self.slots) {
             if (slot.hosted && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
                 SCPHostSetSceneForeground(slot.scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
@@ -1044,9 +1097,15 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 #pragma mark Hosting (same steps as the phone preview)
 
 - (void)hostSlotAtIndex:(NSUInteger)index generation:(NSUInteger)generation {
+    [self hostSlotAtIndex:index generation:generation chain:YES];
+}
+
+// chain: also host the next slot afterwards (session start). An app picked
+// on the car's app bar hosts just its own slot.
+- (void)hostSlotAtIndex:(NSUInteger)index generation:(NSUInteger)generation chain:(BOOL)chain {
     if (generation != self.sessionGeneration || index >= self.slots.count) return;
     SplitCarPlayCarSlot *slot = self.slots[index];
-    if (index > 0) {
+    if (chain && index > 0) {
         SplitCarPlayCarSlot *previous = self.slots[index - 1];
         if (previous.hosted && !SCPHostAppLooksAlive(previous.application, previous.sceneHandle, previous.scene)) {
             SplitCarPlayHostingLog(@"[car] host[%lu] %@: skipped, the first app is no longer running", (unsigned long)index, slot.bundleID);
@@ -1062,13 +1121,14 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             __strong __typeof__(weakSelf) strongSelf = weakSelf;
             if (!strongSelf || generation != strongSelf.sessionGeneration) return;
+            if (![strongSelf.slots containsObject:slot]) return; // replaced meanwhile from the app bar
             if (error) {
                 slot.finished = YES;
                 [strongSelf showMessage:@"Không khởi động được app này." inSlot:slot];
             } else {
                 [strongSelf attachSlot:slot];
             }
-            if (index + 1 < strongSelf.slots.count) {
+            if (chain && index + 1 < strongSelf.slots.count) {
                 dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
                     [weakSelf hostSlotAtIndex:index + 1 generation:generation];
                 });
@@ -1123,6 +1183,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         if (self.rootWindow.hidden) {
             self.rootWindow.hidden = NO;
             SplitCarPlayHostingLog(@"[car]   window shown");
+            [self scheduleAutoDim];
         }
         [self publishCarPlayState];
         [self startKeepAlive];
@@ -1214,6 +1275,215 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     if (gesture.state == UIGestureRecognizerStateBegan) [self closeFromCar];
 }
 
+#pragma mark Thanh tab ứng dụng
+
+- (void)buildAppBar {
+    CGRect bounds = self.rootWindow.bounds;
+    CGFloat height = 56;
+    UIView *bar = [[UIView alloc] initWithFrame:CGRectMake(0, 0, bounds.size.width, height)];
+    bar.backgroundColor = [UIColor colorWithWhite:0.06 alpha:0.9];
+    self.appBar = bar;
+    [self.rootWindow addSubview:bar];
+
+    UIButton *close = [UIButton buttonWithType:UIButtonTypeSystem];
+    [close setTitle:@"✕" forState:UIControlStateNormal];
+    close.titleLabel.font = [UIFont boldSystemFontOfSize:20];
+    close.tintColor = [UIColor whiteColor];
+    close.backgroundColor = [UIColor colorWithRed:1.0 green:0.27 blue:0.23 alpha:1];
+    close.layer.cornerRadius = 20;
+    close.frame = CGRectMake(10, 8, 40, 40);
+    [close addTarget:self action:@selector(closeFromCar) forControlEvents:UIControlEventTouchUpInside];
+    self.carCloseButton = close;
+    [bar addSubview:close];
+
+    UIButton *swap = [UIButton buttonWithType:UIButtonTypeSystem];
+    [swap setImage:[UIImage systemImageNamed:@"arrow.left.arrow.right"] forState:UIControlStateNormal];
+    swap.tintColor = [UIColor whiteColor];
+    swap.backgroundColor = [UIColor colorWithWhite:1 alpha:0.15];
+    swap.layer.cornerRadius = 20;
+    swap.frame = CGRectMake(58, 8, 40, 40);
+    [swap addTarget:self action:@selector(swapPanes) forControlEvents:UIControlEventTouchUpInside];
+    self.swapButton = swap;
+    [bar addSubview:swap];
+
+    UIScrollView *icons = [[UIScrollView alloc] initWithFrame:CGRectMake(108, 0, bounds.size.width - 116, height)];
+    icons.showsHorizontalScrollIndicator = NO;
+    self.appBarIcons = icons;
+    [bar addSubview:icons];
+
+    // Shown while the bar is hidden: tap to bring the bar back.
+    UIButton *handle = [UIButton buttonWithType:UIButtonTypeCustom];
+    handle.frame = CGRectMake((bounds.size.width - 140) / 2.0, 0, 140, 24);
+    UIView *pill = [[UIView alloc] initWithFrame:CGRectMake(45, 7, 50, 6)];
+    pill.userInteractionEnabled = NO;
+    pill.backgroundColor = [UIColor colorWithWhite:1 alpha:0.7];
+    pill.layer.cornerRadius = 3;
+    [handle addSubview:pill];
+    [handle addTarget:self action:@selector(showAppBar) forControlEvents:UIControlEventTouchUpInside];
+    handle.hidden = YES;
+    self.appBarHandle = handle;
+    [self.rootWindow addSubview:handle];
+
+    [self reloadAppBarIcons];
+    [self showAppBar];
+}
+
+// The apps picked in "Ứng dụng"; without any, the ones on screen.
+- (void)reloadAppBarIcons {
+    if (!self.appBarIcons) return;
+    for (UIView *old in [self.appBarIcons.subviews copy]) [old removeFromSuperview];
+    NSMutableArray<NSString *> *ids = [self.carApps mutableCopy] ?: [NSMutableArray new];
+    if (ids.count == 0) {
+        for (SplitCarPlayCarSlot *slot in self.slots) if (slot.bundleID.length) [ids addObject:slot.bundleID];
+    }
+    CGFloat x = 4;
+    for (NSString *bundleID in ids) {
+        UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
+        button.frame = CGRectMake(x, 8, 40, 40);
+        button.accessibilityIdentifier = bundleID;
+        [button setImage:SplitCarPlayIconForBundleID(bundleID) forState:UIControlStateNormal];
+        button.imageView.contentMode = UIViewContentModeScaleAspectFit;
+        button.layer.cornerRadius = 9;
+        button.clipsToBounds = YES;
+        BOOL onScreen = NO;
+        for (SplitCarPlayCarSlot *slot in self.slots) onScreen = onScreen || [slot.bundleID isEqualToString:bundleID];
+        button.layer.borderWidth = onScreen ? 2 : 0;
+        button.layer.borderColor = [UIColor systemGreenColor].CGColor;
+        [button addTarget:self action:@selector(appIconTapped:) forControlEvents:UIControlEventTouchUpInside];
+        UILongPressGestureRecognizer *hold = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(appIconHeld:)];
+        hold.minimumPressDuration = 0.5;
+        [button addGestureRecognizer:hold];
+        [self.appBarIcons addSubview:button];
+        x += 50;
+    }
+    self.appBarIcons.contentSize = CGSizeMake(x, self.appBarIcons.bounds.size.height);
+    self.swapButton.hidden = self.slots.count < 2;
+}
+
+- (void)showAppBar {
+    self.appBar.hidden = NO;
+    self.appBarHandle.hidden = YES;
+    [self.appBarHideTimer invalidate];
+    self.appBarHideTimer = nil;
+    if (self.appBarAutoHide > 0) {
+        __weak __typeof__(self) weakSelf = self;
+        self.appBarHideTimer = [NSTimer scheduledTimerWithTimeInterval:self.appBarAutoHide repeats:NO block:^(NSTimer *timer) {
+            [weakSelf hideAppBar];
+        }];
+    }
+}
+
+- (void)hideAppBar {
+    if (!self.appBar) return;
+    self.appBar.hidden = YES;
+    self.appBarHandle.hidden = NO;
+}
+
+- (void)appIconTapped:(UIButton *)sender {
+    [self openApp:sender.accessibilityIdentifier inPane:0];
+}
+
+- (void)appIconHeld:(UILongPressGestureRecognizer *)gesture {
+    if (gesture.state != UIGestureRecognizerStateBegan) return;
+    [self openApp:gesture.view.accessibilityIdentifier inPane:1];
+}
+
+// Tap = ô 1, hold = ô 2 (adds the second pane in single-app mode). An app
+// already on screen in the other pane swaps sides instead.
+- (void)openApp:(NSString *)bundleID inPane:(NSUInteger)pane {
+    [self showAppBar];
+    if (!self.rootWindow || self.tearingDown || bundleID.length == 0 || self.slots.count == 0) return;
+    for (NSUInteger i = 0; i < self.slots.count; i++) {
+        if (![self.slots[i].bundleID isEqualToString:bundleID]) continue;
+        if (i != MIN(pane, self.slots.count - 1)) [self swapPanes];
+        return;
+    }
+    SplitCarPlayHostingLog(@"[car] app bar: %@ -> pane %lu", bundleID, (unsigned long)pane);
+    SplitCarPlayCarSlot *slot = [SplitCarPlayCarSlot new];
+    slot.bundleID = bundleID;
+    NSUInteger index;
+    if (pane >= self.slots.count) {
+        slot.container = [[UIView alloc] initWithFrame:CGRectZero];
+        slot.container.clipsToBounds = YES;
+        slot.container.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+        [self.rootWindow insertSubview:slot.container belowSubview:self.dividerView];
+        [self.slots addObject:slot];
+        self.singleAppMode = NO;
+        index = self.slots.count - 1;
+    } else {
+        SplitCarPlayCarSlot *old = self.slots[pane];
+        slot.container = old.container;
+        [old.messageLabel removeFromSuperview];
+        old.messageLabel = nil;
+        [self retireSlot:old];
+        self.slots[pane] = slot;
+        index = pane;
+    }
+    self.dividerView.hidden = self.slots.count < 2 || !self.showDivider;
+    [self layoutContainers];
+    [self hostSlotAtIndex:index generation:self.sessionGeneration chain:NO];
+    [self saveLastLayout];
+    [self reloadAppBarIcons];
+}
+
+// An app taken off the car screen: live mode off, background later, view
+// hidden. Nothing is freed (see SCPHosting.h).
+- (void)retireSlot:(SplitCarPlayCarSlot *)slot {
+    UIViewController *controller = slot.appViewController;
+    id application = slot.application, sceneHandle = slot.sceneHandle, scene = slot.scene;
+    BOOL alive = slot.hosted && controller && SCPHostAppLooksAlive(application, sceneHandle, scene);
+    slot.hosted = NO;
+    slot.finished = YES;
+    slot.appViewController = nil;
+    controller.view.hidden = YES;
+    if (!alive) return;
+    SplitCarPlayHostingLog(@"[car]   retire %@: setRequestedMode:0", slot.bundleID);
+    if ([controller respondsToSelector:NSSelectorFromString(@"setRequestedMode:")]) {
+        ((void (*)(id, SEL, NSInteger))objc_msgSend)(controller, NSSelectorFromString(@"setRequestedMode:"), 0);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        for (SplitCarPlayCarSlot *current in self.slots) {
+            if (current.appViewController == controller) return; // picked again meanwhile
+        }
+        if (!SCPHostAppLooksAlive(application, sceneHandle, scene)) return;
+        id settings = [scene respondsToSelector:NSSelectorFromString(@"settings")]
+            ? ((id (*)(id, SEL))objc_msgSend)(scene, NSSelectorFromString(@"settings")) : nil;
+        BOOL foreground = [settings respondsToSelector:NSSelectorFromString(@"isForeground")]
+            && ((BOOL (*)(id, SEL))objc_msgSend)(settings, NSSelectorFromString(@"isForeground"));
+        if (foreground) SCPHostSetSceneForeground(scene, NO, [UIScreen mainScreen].bounds.size);
+    });
+}
+
+- (void)swapPanes {
+    [self showAppBar];
+    if (self.slots.count < 2) return;
+    [self.slots exchangeObjectAtIndex:0 withObjectAtIndex:1];
+    [self layoutContainers];
+    for (SplitCarPlayCarSlot *slot in self.slots) {
+        if (slot.hosted && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
+            SCPHostSetSceneForeground(slot.scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
+        }
+    }
+    SplitCarPlayHostingLog(@"[car] swapped panes");
+    [self saveLastLayout];
+    [self reloadAppBarIcons];
+}
+
+#pragma mark Tự làm tối màn hình
+
+- (void)scheduleAutoDim {
+    if (!self.autoDimPhone) return;
+    NSUInteger generation = self.sessionGeneration;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        if (generation != self.sessionGeneration || !self.rootWindow || self.rootWindow.hidden || !self.autoDimPhone) return;
+        if (!SCPCopyPrefs()[@"dimSavedBrightness"]) {
+            SplitCarPlayWritePref(@"dimSavedBrightness", @([UIScreen mainScreen].brightness));
+        }
+        [UIScreen mainScreen].brightness = 0.0;
+        SplitCarPlayHostingLog(@"[car] phone screen dimmed");
+    });
+}
+
 #pragma mark Teardown (one app at a time, nothing freed)
 
 - (void)dropWindowNow {
@@ -1237,6 +1507,13 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     }
     SplitCarPlayHostingLog(@"[car] stop");
     self.tearingDown = YES;
+    [self.appBarHideTimer invalidate];
+    self.appBarHideTimer = nil;
+    self.appBar = nil;
+    self.appBarIcons = nil;
+    self.swapButton = nil;
+    self.appBarHandle = nil;
+    SplitCarPlayRestoreBrightness();
     // ✕, watchdog, no app left: don't auto-start again until the car
     // reconnects (UIScreenDidDisconnect clears this) or "Đang bật" is
     // switched off and on.
@@ -1457,6 +1734,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         // and creating windows / touching SpringBoard classes that early
         // can crash on every respawn (-> safe mode).
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            SplitCarPlayRestoreBrightness(); // left dimmed if SpringBoard died mid-session
             [[SplitCarPlayController sharedInstance] reloadFromPreferences];
         });
     }

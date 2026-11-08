@@ -1,42 +1,335 @@
 //
 //  OnCarViewController.m -- "Trên xe" tab
 //
-//  Native UIKit re-implementation of what used to be the Settings
-//  Root.plist (Prefs.bundle) -- same shared prefs file, same keys, just
-//  a plain table view instead of PSSpecifiers now that this is its own
-//  app rather than a Settings panel. See ROADMAP.md's "Architecture
-//  pivot" entry for why.
+//  Laid out like SidePlay2's tab of the same name: a CARPLAY section of
+//  switches and a TUỲ CHỈNH section of sub-pages, plus NÂNG CAO (the
+//  one-shot test switch and the debug log). Every value is a pref in the
+//  shared domain (../SplitCarPlayShared.h), read by Tweak.xm in SpringBoard.
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import "../SplitCarPlayShared.h"
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // AppPickerController.m
-extern void SplitCarPlaySetPref(NSString *key, id value); // AppPickerController.m
+extern UIImage *SplitCarPlayAppIcon(NSString *bundleID);                 // AppPickerController.m
+extern NSArray<NSString *> *SplitCarPlayUserInstalledBundleIDsSorted(void); // AppPickerController.m
+extern void SplitCarPlaySetPref(NSString *key, id value);                // AppPickerController.m
 @interface AppPickerController : UIViewController
 + (void)presentFrom:(UIViewController *)presenter title:(NSString *)title onPick:(void (^)(NSString *bundleID))onPick;
 @end
 
+static const NSUInteger kSCPMaxCarApps = 12;
 
-typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
-    SplitCarPlayRowKindSwitch,
-    SplitCarPlayRowKindSlider,
-    SplitCarPlayRowKindButton,
+#pragma mark - Rows
+
+typedef NS_ENUM(NSInteger, SCPRowKind) {
+    SCPRowKindSwitch,
+    SCPRowKindSlider,
+    SCPRowKindChoice,   // one of `options`, stored as its index
+    SCPRowKindApp,      // a bundle ID, picked with AppPickerController
+    SCPRowKindPage,     // pushes `pageBuilder`
+    SCPRowKindAction,   // runs `action`
 };
 
-@interface SplitCarPlayRow : NSObject
+@interface SCPRow : NSObject
 @property (nonatomic, copy) NSString *label;
 @property (nonatomic, copy) NSString *key;
-@property (nonatomic, assign) SplitCarPlayRowKind kind;
+@property (nonatomic, assign) SCPRowKind kind;
+@property (nonatomic, copy) NSString *symbol;      // SF Symbol for the coloured square, optional
+@property (nonatomic, strong) UIColor *symbolColor;
+@property (nonatomic, assign) BOOL defaultOn;
 @property (nonatomic, assign) CGFloat sliderMin;
 @property (nonatomic, assign) CGFloat sliderMax;
-@property (nonatomic, assign) BOOL defaultOn; // SplitCarPlayRowKindSwitch only -- must match Tweak.xm's loadPreferences defaults
-@property (nonatomic, copy) NSString *buttonAction; // selector name as string, resolved in cellForRow
-@end
-@implementation SplitCarPlayRow
+@property (nonatomic, copy) NSArray<NSString *> *options;
+@property (nonatomic, strong) NSArray *optionValues; // stored instead of the index when set
+@property (nonatomic, copy) NSString * (^detail)(NSDictionary *prefs);
+@property (nonatomic, copy) UIViewController * (^pageBuilder)(void);
+@property (nonatomic, copy) void (^action)(UIViewController *from);
+@property (nonatomic, copy) void (^afterChange)(id value); // e.g. keep two prefs in sync
 @end
 
-#pragma mark - Log viewer (for the experimental section below)
+@implementation SCPRow
+@end
+
+static SCPRow *SCPSwitch(NSString *label, NSString *key, BOOL defaultOn) {
+    SCPRow *row = [SCPRow new];
+    row.label = label; row.key = key; row.kind = SCPRowKindSwitch; row.defaultOn = defaultOn;
+    return row;
+}
+
+static SCPRow *SCPSlider(NSString *label, NSString *key, CGFloat min, CGFloat max) {
+    SCPRow *row = [SCPRow new];
+    row.label = label; row.key = key; row.kind = SCPRowKindSlider; row.sliderMin = min; row.sliderMax = max;
+    return row;
+}
+
+static SCPRow *SCPChoice(NSString *label, NSString *key, NSArray<NSString *> *options) {
+    SCPRow *row = [SCPRow new];
+    row.label = label; row.key = key; row.kind = SCPRowKindChoice; row.options = options;
+    return row;
+}
+
+static SCPRow *SCPApp(NSString *label, NSString *key) {
+    SCPRow *row = [SCPRow new];
+    row.label = label; row.key = key; row.kind = SCPRowKindApp;
+    return row;
+}
+
+static SCPRow *SCPPage(NSString *label, UIViewController * (^builder)(void)) {
+    SCPRow *row = [SCPRow new];
+    row.label = label; row.kind = SCPRowKindPage; row.pageBuilder = builder;
+    return row;
+}
+
+static SCPRow *SCPWithIcon(SCPRow *row, NSString *symbol, UIColor *color) {
+    row.symbol = symbol;
+    row.symbolColor = color;
+    return row;
+}
+
+static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
+    CGFloat size = 29;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size)];
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [color setFill];
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, size, size) cornerRadius:7] fill];
+        UIImageSymbolConfiguration *config = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
+        UIImage *glyph = [[UIImage systemImageNamed:symbol withConfiguration:config] imageWithTintColor:[UIColor whiteColor]
+                                                                                           renderingMode:UIImageRenderingModeAlwaysOriginal];
+        if (glyph) {
+            CGSize g = glyph.size;
+            [glyph drawInRect:CGRectMake((size - g.width) / 2.0, (size - g.height) / 2.0, g.width, g.height)];
+        }
+    }];
+}
+
+#pragma mark - Generic settings list
+
+@interface SCPSettingsListController : UITableViewController
+@property (nonatomic, copy) NSArray<NSString *> *sectionTitles;
+@property (nonatomic, copy) NSArray<NSString *> *sectionFooters;
+@property (nonatomic, copy) NSArray<NSArray<SCPRow *> *> *sections;
+@end
+
+@implementation SCPSettingsListController
+
+- (instancetype)init {
+    return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData]; // SpringBoard changes some prefs by itself
+}
+
+- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
+    return self.sections.count;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
+    NSString *title = section < (NSInteger)self.sectionTitles.count ? self.sectionTitles[section] : nil;
+    return title.length ? title : nil;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    NSString *footer = section < (NSInteger)self.sectionFooters.count ? self.sectionFooters[section] : nil;
+    return footer.length ? footer : nil;
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return self.sections[section].count;
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    SCPRow *row = self.sections[indexPath.section][indexPath.row];
+    NSDictionary *prefs = SCPCopyPrefs();
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    cell.textLabel.text = row.label;
+    cell.selectionStyle = UITableViewCellSelectionStyleNone;
+    if (row.symbol) cell.imageView.image = SCPRowIcon(row.symbol, row.symbolColor ?: [UIColor systemBlueColor]);
+
+    switch (row.kind) {
+        case SCPRowKindSwitch: {
+            UISwitch *toggle = [[UISwitch alloc] init];
+            toggle.on = prefs[row.key] ? [prefs[row.key] boolValue] : row.defaultOn;
+            [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
+            objc_setAssociatedObject(toggle, "row", row, OBJC_ASSOCIATION_RETAIN);
+            cell.accessoryView = toggle;
+            break;
+        }
+        case SCPRowKindSlider: {
+            UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 150, 31)];
+            slider.minimumValue = row.sliderMin;
+            slider.maximumValue = row.sliderMax;
+            slider.value = prefs[row.key] ? [prefs[row.key] floatValue] : (row.sliderMin + row.sliderMax) / 2.0;
+            [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
+            objc_setAssociatedObject(slider, "row", row, OBJC_ASSOCIATION_RETAIN);
+            cell.accessoryView = slider;
+            break;
+        }
+        case SCPRowKindChoice:
+        case SCPRowKindApp:
+        case SCPRowKindPage:
+        case SCPRowKindAction:
+            cell.detailTextLabel.text = [self detailForRow:row prefs:prefs];
+            cell.accessoryType = row.kind == SCPRowKindAction ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
+            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
+            if (row.kind == SCPRowKindApp) {
+                UIImage *icon = SplitCarPlayAppIcon(prefs[row.key]);
+                if (icon) {
+                    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
+                    cell.imageView.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+                        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 29, 29) cornerRadius:7] addClip];
+                        [icon drawInRect:CGRectMake(0, 0, 29, 29)];
+                    }];
+                }
+            }
+            break;
+    }
+    return cell;
+}
+
+- (NSString *)detailForRow:(SCPRow *)row prefs:(NSDictionary *)prefs {
+    if (row.detail) return row.detail(prefs);
+    if (row.kind == SCPRowKindApp) return SplitCarPlayDisplayNameForBundleID(prefs[row.key]) ?: @"(chưa chọn)";
+    if (row.kind == SCPRowKindChoice) {
+        id stored = prefs[row.key];
+        NSUInteger index = row.optionValues ? [row.optionValues indexOfObject:stored ?: @0] : (NSUInteger)[stored integerValue];
+        if (index == NSNotFound || index >= row.options.count) index = 0;
+        return row.options[index];
+    }
+    return nil;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    SCPRow *row = self.sections[indexPath.section][indexPath.row];
+    __weak __typeof__(self) weakSelf = self;
+    switch (row.kind) {
+        case SCPRowKindPage: {
+            UIViewController *page = row.pageBuilder ? row.pageBuilder() : nil;
+            if (page) [self.navigationController pushViewController:page animated:YES];
+            break;
+        }
+        case SCPRowKindAction:
+            if (row.action) row.action(self);
+            break;
+        case SCPRowKindApp:
+            [AppPickerController presentFrom:self title:row.label onPick:^(NSString *bundleID) {
+                SplitCarPlaySetPref(row.key, bundleID);
+                if (row.afterChange) row.afterChange(bundleID);
+                [weakSelf.tableView reloadData];
+            }];
+            break;
+        case SCPRowKindChoice: {
+            UIAlertController *sheet = [UIAlertController alertControllerWithTitle:row.label message:nil preferredStyle:UIAlertControllerStyleActionSheet];
+            [row.options enumerateObjectsUsingBlock:^(NSString *option, NSUInteger index, BOOL *stop) {
+                [sheet addAction:[UIAlertAction actionWithTitle:option style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
+                    id value = row.optionValues ? row.optionValues[index] : @(index);
+                    SplitCarPlaySetPref(row.key, value);
+                    if (row.afterChange) row.afterChange(value);
+                    [weakSelf.tableView reloadData];
+                }]];
+            }];
+            [sheet addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
+            sheet.popoverPresentationController.sourceView = self.view;
+            sheet.popoverPresentationController.sourceRect = [tableView rectForRowAtIndexPath:indexPath];
+            [self presentViewController:sheet animated:YES completion:nil];
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+- (void)switchChanged:(UISwitch *)sender {
+    SCPRow *row = objc_getAssociatedObject(sender, "row");
+    SplitCarPlaySetPref(row.key, @(sender.isOn));
+    if (row.afterChange) row.afterChange(@(sender.isOn));
+}
+
+- (void)sliderChanged:(UISlider *)sender {
+    SCPRow *row = objc_getAssociatedObject(sender, "row");
+    SplitCarPlaySetPref(row.key, @(sender.value));
+}
+
+@end
+
+#pragma mark - "Ứng dụng": which apps the car's app bar offers
+
+@interface SCPCarAppsController : UITableViewController
+@end
+
+@implementation SCPCarAppsController {
+    NSArray<NSString *> *_installed;
+    NSMutableArray<NSString *> *_chosen;
+}
+
+- (instancetype)init {
+    return [super initWithStyle:UITableViewStyleInsetGrouped];
+}
+
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    self.title = @"Ứng dụng";
+    _installed = SplitCarPlayUserInstalledBundleIDsSorted();
+    NSArray *stored = SCPCopyPrefs()[@"carApps"];
+    _chosen = [stored isKindOfClass:[NSArray class]] ? [stored mutableCopy] : [NSMutableArray new];
+    [self updateTitle];
+}
+
+- (void)updateTitle {
+    self.navigationItem.prompt = nil;
+    self.title = [NSString stringWithFormat:@"Ứng dụng (%lu/%lu)", (unsigned long)_chosen.count, (unsigned long)kSCPMaxCarApps];
+}
+
+- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
+    return _installed.count;
+}
+
+- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
+    return [NSString stringWithFormat:@"Các app được chọn (tối đa %lu) hiện trên thanh tab ở màn hình xe. Trên xe: chạm icon để mở ở ô 1, giữ icon để mở ở ô 2.", (unsigned long)kSCPMaxCarApps];
+}
+
+- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
+    NSString *bundleID = _installed[indexPath.row];
+    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    cell.textLabel.text = SplitCarPlayDisplayNameForBundleID(bundleID);
+    UIImage *icon = SplitCarPlayAppIcon(bundleID);
+    if (icon) {
+        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
+        cell.imageView.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+            [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 29, 29) cornerRadius:7] addClip];
+            [icon drawInRect:CGRectMake(0, 0, 29, 29)];
+        }];
+    }
+    cell.accessoryType = [_chosen containsObject:bundleID] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
+    return cell;
+}
+
+- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
+    [tableView deselectRowAtIndexPath:indexPath animated:YES];
+    NSString *bundleID = _installed[indexPath.row];
+    if ([_chosen containsObject:bundleID]) {
+        [_chosen removeObject:bundleID];
+    } else if (_chosen.count < kSCPMaxCarApps) {
+        [_chosen addObject:bundleID];
+    } else {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Đã đủ 12 app"
+                                                                       message:@"Bỏ chọn một app khác trước."
+                                                                preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    SplitCarPlaySetPref(@"carApps", [_chosen copy]);
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    [self updateTitle];
+}
+
+@end
+
+#pragma mark - Log viewer (share / clear)
 
 static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
 
@@ -52,8 +345,13 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
     self.title = @"Log debug";
     self.view.backgroundColor = [UIColor systemBackgroundColor];
 
-    self.navigationItem.rightBarButtonItem = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
-                                                                                              target:self action:@selector(reload)];
+    UIBarButtonItem *share = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemAction
+                                                                           target:self action:@selector(shareLog:)];
+    UIBarButtonItem *reload = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemRefresh
+                                                                            target:self action:@selector(reload)];
+    UIBarButtonItem *clear = [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemTrash
+                                                                           target:self action:@selector(confirmClear)];
+    self.navigationItem.rightBarButtonItems = @[share, reload, clear];
 
     _textView = [[UITextView alloc] init];
     _textView.editable = NO;
@@ -65,8 +363,42 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
 
 - (void)reload {
     NSString *content = [NSString stringWithContentsOfFile:kHostingLogPath encoding:NSUTF8StringEncoding error:nil];
-    _textView.text = content.length > 0 ? content
-        : @"(Chưa có log — log chỉ được ghi khi \"Bật thử nghiệm\" ở trên đang BẬT và CarPlay thật được cắm vào.)";
+    _textView.text = content.length > 0 ? content : @"(Chưa có log.)";
+    if (content.length > 0) {
+        // Newest lines are at the end.
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self->_textView scrollRangeToVisible:NSMakeRange(self->_textView.text.length - 1, 1)];
+        });
+    }
+}
+
+// Shares a copy (in this app's tmp folder) so the receiving app can read it.
+- (void)shareLog:(UIBarButtonItem *)sender {
+    NSData *data = [NSData dataWithContentsOfFile:kHostingLogPath];
+    if (data.length == 0) {
+        UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Chưa có log" message:nil preferredStyle:UIAlertControllerStyleAlert];
+        [alert addAction:[UIAlertAction actionWithTitle:@"OK" style:UIAlertActionStyleDefault handler:nil]];
+        [self presentViewController:alert animated:YES completion:nil];
+        return;
+    }
+    NSString *copyPath = [NSTemporaryDirectory() stringByAppendingPathComponent:@"splitcarplay_hosting.log"];
+    [data writeToFile:copyPath atomically:YES];
+    NSArray *items = @[[NSURL fileURLWithPath:copyPath]];
+    UIActivityViewController *sheet = [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
+    sheet.popoverPresentationController.barButtonItem = sender;
+    [self presentViewController:sheet animated:YES completion:nil];
+}
+
+- (void)confirmClear {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Xoá log?"
+                                                                   message:@"Xoá trước khi thử lại để log mới dễ đọc hơn."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Xoá" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        [[NSData data] writeToFile:kHostingLogPath atomically:NO];
+        [self reload];
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)viewDidLayoutSubviews {
@@ -76,223 +408,123 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
 
 @end
 
-@interface OnCarViewController : UITableViewController
+#pragma mark - "Trên xe"
+
+static NSString *SCPAppBarDetail(NSDictionary *prefs) {
+    NSInteger seconds = [prefs[@"appBarAutoHide"] integerValue];
+    return seconds > 0 ? [NSString stringWithFormat:@"%ld giây", (long)seconds] : @"Luôn hiện";
+}
+
+@interface OnCarViewController : SCPSettingsListController
 @end
 
-@implementation OnCarViewController {
-    NSArray<NSString *> *_sectionTitles;
-    NSArray<NSString *> *_sectionFooters;
-    NSArray<NSArray<SplitCarPlayRow *> *> *_sections;
-}
-
-- (instancetype)init {
-    self = [super initWithStyle:UITableViewStyleInsetGrouped];
-    return self;
-}
-
-- (SplitCarPlayRow *)rowSwitch:(NSString *)label key:(NSString *)key {
-    return [self rowSwitch:label key:key default:YES];
-}
-
-- (SplitCarPlayRow *)rowSwitch:(NSString *)label key:(NSString *)key default:(BOOL)defaultOn {
-    SplitCarPlayRow *row = [SplitCarPlayRow new];
-    row.label = label; row.key = key; row.kind = SplitCarPlayRowKindSwitch; row.defaultOn = defaultOn;
-    return row;
-}
-
-- (SplitCarPlayRow *)rowSlider:(NSString *)label key:(NSString *)key min:(CGFloat)min max:(CGFloat)max {
-    SplitCarPlayRow *row = [SplitCarPlayRow new];
-    row.label = label; row.key = key; row.kind = SplitCarPlayRowKindSlider;
-    row.sliderMin = min; row.sliderMax = max;
-    return row;
-}
-
-- (SplitCarPlayRow *)rowButton:(NSString *)label key:(NSString *)key {
-    SplitCarPlayRow *row = [SplitCarPlayRow new];
-    row.label = label; row.key = key; row.kind = SplitCarPlayRowKindButton;
-    return row;
-}
+@implementation OnCarViewController
 
 - (void)viewDidLoad {
     [super viewDidLoad];
     self.title = @"Trên xe";
+    self.navigationController.navigationBar.prefersLargeTitles = YES;
+    self.navigationItem.largeTitleDisplayMode = UINavigationItemLargeTitleDisplayModeAlways;
 
-    _sectionTitles = @[@"Trạng thái", @"Ứng dụng", @"Bố cục", @"Thẻ tốc độ", @"Ứng dụng nguồn (Vietmap Live)", @"Thử nghiệm: chia màn hình CarPlay thật"];
-    _sectionFooters = @[
-        @"", @"", @"", @"", @"",
-        @"⚠️ Chế độ thử 1 lần: công tắc tự TẮT khi bắt đầu một lần thử, nên lần cắm CarPlay sau sẽ trở lại bình thường. Cửa sổ chỉ hiện khi đã có app; nếu sau 12 giây không có app nào thì tự gỡ. Muốn app tự hiện mỗi lần cắm xe thì dùng công tắc \"Đang bật\" ở Trang chủ. Trên màn hình xe: bấm ✕ hoặc giữ 2 ngón tay 1 giây để thoát. Mọi bước được ghi vào log debug.",
+    UIColor *blue = [UIColor systemBlueColor];
+    UIColor *indigo = [UIColor systemIndigoColor];
+
+    SCPRow *openOnConnect = SCPWithIcon(SCPSwitch(@"Mở khi kết nối CarPlay", @"carPlayAutoHost", NO), @"car.fill", blue);
+    openOnConnect.afterChange = ^(id value) {
+        // Same switch as "Đang bật" on Trang chủ.
+        if ([value boolValue]) {
+            SplitCarPlaySetPref(@"enabled", @YES);
+            SplitCarPlaySetPref(@"carPlayCrashNotice", @NO);
+        }
+    };
+
+    self.sectionTitles = @[@"CarPlay", @"Tuỳ chỉnh", @"Nâng cao"];
+    self.sectionFooters = @[
+        @"\"Mở khi kết nối CarPlay\" là cùng công tắc với \"Đang bật\" ở Trang chủ. \"Tự làm tối màn hình\": 10 giây sau khi app hiện trên xe, màn hình điện thoại tối đi; tắt app trên xe thì sáng lại.",
+        @"",
+        @"\"Thử 1 lần\" tự TẮT khi bắt đầu một lần thử. Trên màn hình xe: bấm ✕ trên thanh tab hoặc giữ 2 ngón tay 1 giây để quay về CarPlay bình thường.",
     ];
-    _sections = @[
-        @[ [self rowSwitch:@"Bật tính năng" key:@"enabled"] ],
-        @[ [self rowButton:@"Ô 1" key:@"leftBundleID"],
-           [self rowButton:@"Ô 2" key:@"rightBundleID"] ],
-        @[ [self rowSlider:@"Tỉ lệ chia (trái %)" key:@"splitRatio" min:0.2 max:0.8],
-           [self rowSwitch:@"Hiện thanh chia" key:@"showDivider"],
-           [self rowButton:@"Kiểu bong bóng" key:@"bubbleStyle"],
-           [self rowButton:@"Vị trí bong bóng" key:@"bubblePosition"],
-           [self rowSlider:@"Kích thước bong bóng" key:@"bubbleScale" min:0.6 max:1.6] ],
-        @[ [self rowSwitch:@"Cảnh báo vượt tốc độ" key:@"speedAudioAlert"],
-           [self rowSwitch:@"Hiện ngày" key:@"showDate"],
-           [self rowSwitch:@"Hiện pin" key:@"showBattery"],
-           [self rowSwitch:@"Hiện nhạc đang phát" key:@"showNowPlaying"] ],
-        @[ [self rowSwitch:@"Giữ chạy nền" key:@"keepSourceAppAlive"],
-           [self rowSwitch:@"Tự thoát khi rút CarPlay" key:@"autoExitSourceApp" default:NO] ],
-        @[ [self rowSwitch:@"⚠️ Bật thử nghiệm (1 lần)" key:@"experimentalHostingEnabled" default:NO],
-           [self rowSwitch:@"Chỉ 1 app toàn màn hình (ô 1)" key:@"experimentalSingleApp" default:YES],
-           [self rowButton:@"Xem log debug" key:@"_viewLog"] ],
+    self.sections = @[
+        @[ openOnConnect,
+           SCPWithIcon(SCPSwitch(@"Mở lại bố cục lần cuối", @"restoreLastLayout", YES), @"arrow.counterclockwise", indigo),
+           SCPWithIcon(SCPSwitch(@"Tự làm tối màn hình", @"autoDimPhone", NO), @"power", indigo) ],
+        @[ SCPWithIcon(SCPPage(@"Bong bóng tốc độ", ^UIViewController *{ return [OnCarViewController bubblePage]; }),
+                       @"speedometer", [UIColor systemOrangeColor]),
+           [self appBarRow],
+           SCPWithIcon(SCPPage(@"Mở nhanh", ^UIViewController *{ return [OnCarViewController quickOpenPage]; }),
+                       @"sparkles", blue),
+           SCPWithIcon(SCPPage(@"Màn hình trên xe", ^UIViewController *{ return [OnCarViewController carScreenPage]; }),
+                       @"rectangle.split.2x1", blue),
+           [self appsRow] ],
+        @[ SCPWithIcon(SCPSwitch(@"Thử 1 lần (lần cắm xe tới)", @"experimentalHostingEnabled", NO), @"exclamationmark.triangle.fill", [UIColor systemYellowColor]),
+           [self logRow] ],
     ];
 }
 
-// Re-read prefs each time the tab shows: the tweak turns
-// experimentalHostingEnabled back off by itself after each attempt.
-- (void)viewWillAppear:(BOOL)animated {
-    [super viewWillAppear:animated];
-    [self.tableView reloadData];
+- (SCPRow *)appBarRow {
+    SCPRow *row = SCPChoice(@"Thanh tab ứng dụng", @"appBarAutoHide", @[@"Luôn hiện", @"3 giây", @"5 giây", @"10 giây"]);
+    row.optionValues = @[@0, @3, @5, @10];
+    row.detail = ^NSString *(NSDictionary *prefs) { return SCPAppBarDetail(prefs); };
+    return SCPWithIcon(row, @"menubar.rectangle", [UIColor systemGrayColor]);
 }
 
-- (NSDictionary *)prefs {
-    return SCPCopyPrefs(); // includes the shared defaults (../SplitCarPlayShared.h)
+- (SCPRow *)appsRow {
+    SCPRow *row = SCPPage(@"Ứng dụng", ^UIViewController *{ return [SCPCarAppsController new]; });
+    row.detail = ^NSString *(NSDictionary *prefs) {
+        NSArray *apps = [prefs[@"carApps"] isKindOfClass:[NSArray class]] ? prefs[@"carApps"] : @[];
+        return [NSString stringWithFormat:@"%lu/%lu", (unsigned long)apps.count, (unsigned long)kSCPMaxCarApps];
+    };
+    return SCPWithIcon(row, @"square.grid.2x2.fill", [UIColor systemPurpleColor]);
 }
 
-- (BOOL)boolForKey:(NSString *)key default:(BOOL)defaultValue {
-    id value = [self prefs][key];
-    return value ? [value boolValue] : defaultValue;
+- (SCPRow *)logRow {
+    SCPRow *row = SCPPage(@"Xem log debug", ^UIViewController *{ return [LogViewerController new]; });
+    return SCPWithIcon(row, @"doc.text.magnifyingglass", [UIColor systemGrayColor]);
 }
 
-- (CGFloat)floatForKey:(NSString *)key default:(CGFloat)defaultValue {
-    id value = [self prefs][key];
-    return value ? [value doubleValue] : defaultValue;
++ (UIViewController *)bubblePage {
+    SCPSettingsListController *page = [SCPSettingsListController new];
+    page.title = @"Bong bóng tốc độ";
+    page.sectionTitles = @[@"", @"Hiển thị", @"Ứng dụng nguồn (Vietmap Live)"];
+    page.sectionFooters = @[@"", @"", @"Tốc độ lấy từ Vietmap Live đang chạy trên điện thoại."];
+    page.sections = @[
+        @[ SCPSwitch(@"Hiện bong bóng", @"showSpeedBubble", YES),
+           SCPChoice(@"Kiểu", @"bubbleStyle", @[@"Card", @"Ring", @"Bar"]),
+           SCPChoice(@"Vị trí", @"bubblePosition", @[@"Trái", @"Phải"]),
+           SCPSlider(@"Kích thước", @"bubbleScale", 0.6, 1.6) ],
+        @[ SCPSwitch(@"Cảnh báo vượt tốc độ", @"speedAudioAlert", YES),
+           SCPSwitch(@"Hiện ngày", @"showDate", YES),
+           SCPSwitch(@"Hiện pin", @"showBattery", YES),
+           SCPSwitch(@"Hiện nhạc đang phát", @"showNowPlaying", YES) ],
+        @[ SCPSwitch(@"Giữ chạy nền", @"keepSourceAppAlive", YES),
+           SCPSwitch(@"Tự thoát khi rút CarPlay", @"autoExitSourceApp", NO) ],
+    ];
+    return page;
 }
 
-#pragma mark - Table view
-
-- (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
-    return _sections.count;
++ (UIViewController *)quickOpenPage {
+    SCPSettingsListController *page = [SCPSettingsListController new];
+    page.title = @"Mở nhanh";
+    page.sectionTitles = @[@"Mở khi cắm xe"];
+    page.sectionFooters = @[@"Bố cục mở ra khi cắm CarPlay. Nếu bật \"Mở lại bố cục lần cuối\", lần sau sẽ mở lại đúng app và tỉ lệ đã dùng lần trước trên xe thay cho bố cục này."];
+    page.sections = @[
+        @[ SCPApp(@"Ô 1", @"leftBundleID"),
+           SCPApp(@"Ô 2", @"rightBundleID"),
+           SCPSwitch(@"Chỉ 1 app toàn màn hình (ô 1)", @"experimentalSingleApp", YES) ],
+    ];
+    return page;
 }
 
-- (NSString *)tableView:(UITableView *)tableView titleForHeaderInSection:(NSInteger)section {
-    return _sectionTitles[section];
-}
-
-- (NSString *)tableView:(UITableView *)tableView titleForFooterInSection:(NSInteger)section {
-    NSString *footer = _sectionFooters[section];
-    return footer.length > 0 ? footer : nil;
-}
-
-- (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
-    return _sections[section].count;
-}
-
-- (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-    SplitCarPlayRow *row = _sections[indexPath.section][indexPath.row];
-    static NSString * const kIdentifier = @"Row";
-    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:kIdentifier];
-    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:kIdentifier];
-    cell.textLabel.text = row.label;
-    cell.detailTextLabel.text = nil;
-    cell.accessoryView = nil;
-    cell.accessoryType = UITableViewCellAccessoryNone;
-    cell.selectionStyle = UITableViewCellSelectionStyleNone;
-
-    switch (row.kind) {
-        case SplitCarPlayRowKindSwitch: {
-            UISwitch *toggle = [[UISwitch alloc] init];
-            toggle.on = [self boolForKey:row.key default:row.defaultOn];
-            toggle.tag = indexPath.section * 100 + indexPath.row;
-            [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
-            objc_setAssociatedObject(toggle, "key", row.key, OBJC_ASSOCIATION_RETAIN);
-            cell.accessoryView = toggle;
-            break;
-        }
-        case SplitCarPlayRowKindSlider: {
-            UISlider *slider = [[UISlider alloc] initWithFrame:CGRectMake(0, 0, 160, 31)];
-            slider.minimumValue = row.sliderMin;
-            slider.maximumValue = row.sliderMax;
-            slider.value = [self floatForKey:row.key default:(row.sliderMin + row.sliderMax) / 2.0];
-            [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
-            objc_setAssociatedObject(slider, "key", row.key, OBJC_ASSOCIATION_RETAIN);
-            cell.accessoryView = slider;
-            break;
-        }
-        case SplitCarPlayRowKindButton: {
-            cell.detailTextLabel.text = [self detailTextForButtonRow:row];
-            cell.accessoryType = UITableViewCellAccessoryDisclosureIndicator;
-            cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            break;
-        }
-    }
-    return cell;
-}
-
-- (NSString *)detailTextForButtonRow:(SplitCarPlayRow *)row {
-    if ([row.key isEqualToString:@"leftBundleID"] || [row.key isEqualToString:@"rightBundleID"]) {
-        return SplitCarPlayDisplayNameForBundleID([self prefs][row.key]) ?: @"(chưa chọn)";
-    }
-    if ([row.key isEqualToString:@"bubbleStyle"]) {
-        NSArray *names = @[@"Card", @"Ring", @"Bar"];
-        NSInteger index = [self floatForKey:row.key default:0];
-        return names[MAX(0, MIN(names.count - 1, index))];
-    }
-    if ([row.key isEqualToString:@"bubblePosition"]) {
-        NSArray *names = @[@"Trái", @"Phải"];
-        NSInteger index = [self floatForKey:row.key default:1];
-        return names[MAX(0, MIN(names.count - 1, index))];
-    }
-    return nil;
-}
-
-- (void)tableView:(UITableView *)tableView didSelectRowAtIndexPath:(NSIndexPath *)indexPath {
-    [tableView deselectRowAtIndexPath:indexPath animated:YES];
-    SplitCarPlayRow *row = _sections[indexPath.section][indexPath.row];
-    if (row.kind != SplitCarPlayRowKindButton) return;
-
-    if ([row.key isEqualToString:@"leftBundleID"] || [row.key isEqualToString:@"rightBundleID"]) {
-        NSString *key = row.key;
-        [AppPickerController presentFrom:self
-                                    title:[key isEqualToString:@"leftBundleID"] ? @"Chọn app ô 1" : @"Chọn app ô 2"
-                                   onPick:^(NSString *bundleID) {
-            SplitCarPlaySetPref(key, bundleID);
-            [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-        }];
-        return;
-    }
-    if ([row.key isEqualToString:@"bubbleStyle"]) {
-        [self presentChoiceForKey:@"bubbleStyle" title:@"Kiểu bong bóng" options:@[@"Card", @"Ring", @"Bar"] indexPath:indexPath];
-        return;
-    }
-    if ([row.key isEqualToString:@"bubblePosition"]) {
-        [self presentChoiceForKey:@"bubblePosition" title:@"Vị trí bong bóng" options:@[@"Trái", @"Phải"] indexPath:indexPath];
-        return;
-    }
-    if ([row.key isEqualToString:@"_viewLog"]) {
-        [self.navigationController pushViewController:[[LogViewerController alloc] init] animated:YES];
-        return;
-    }
-}
-
-- (void)presentChoiceForKey:(NSString *)key title:(NSString *)title options:(NSArray<NSString *> *)options indexPath:(NSIndexPath *)indexPath {
-    UIAlertController *sheet = [UIAlertController alertControllerWithTitle:title message:nil preferredStyle:UIAlertControllerStyleActionSheet];
-    [options enumerateObjectsUsingBlock:^(NSString *option, NSUInteger index, BOOL *stop) {
-        [sheet addAction:[UIAlertAction actionWithTitle:option style:UIAlertActionStyleDefault handler:^(UIAlertAction *action) {
-            SplitCarPlaySetPref(key, @(index));
-            [self.tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
-        }]];
-    }];
-    [sheet addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
-    // iPad needs a popover anchor or this crashes; harmless on iPhone.
-    sheet.popoverPresentationController.sourceView = self.view;
-    sheet.popoverPresentationController.sourceRect = [self.tableView rectForRowAtIndexPath:indexPath];
-    [self presentViewController:sheet animated:YES completion:nil];
-}
-
-- (void)switchChanged:(UISwitch *)sender {
-    NSString *key = objc_getAssociatedObject(sender, "key");
-    SplitCarPlaySetPref(key, @(sender.isOn));
-}
-
-- (void)sliderChanged:(UISlider *)sender {
-    NSString *key = objc_getAssociatedObject(sender, "key");
-    SplitCarPlaySetPref(key, @(sender.value));
++ (UIViewController *)carScreenPage {
+    SCPSettingsListController *page = [SCPSettingsListController new];
+    page.title = @"Màn hình trên xe";
+    page.sectionTitles = @[@"Bố cục"];
+    page.sectionFooters = @[@"Trên xe có thể kéo thanh chia để đổi tỉ lệ; tỉ lệ mới được nhớ lại."];
+    page.sections = @[
+        @[ SCPSlider(@"Tỉ lệ chia (ô 1)", @"splitRatio", 0.2, 0.8),
+           SCPSwitch(@"Hiện thanh chia", @"showDivider", YES) ],
+    ];
+    return page;
 }
 
 @end

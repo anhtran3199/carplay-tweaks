@@ -46,6 +46,21 @@ Still unknown until a car test (all logged with a `[car]` prefix):
 - whether the scenes stay foreground while the phone is locked (try
   unlocked first).
 
+### "Trên xe" tab (0.8.2, laid out like SidePlay2's)
+
+| Row | Pref | What it does (SpringBoard, `Tweak.xm`) |
+|---|---|---|
+| Mở khi kết nối CarPlay | `carPlayAutoHost` | Same switch as "Đang bật" on Trang chủ |
+| Mở lại bố cục lần cuối | `restoreLastLayout` | Opens the apps/split last used on the car (`carLast*`, saved on start, divider drag, app switch, swap) instead of "Mở nhanh" |
+| Tự làm tối màn hình | `autoDimPhone` | Phone brightness to 0 ten seconds after the apps show; restored on stop (saved in `dimSavedBrightness`, also restored after a SpringBoard restart) |
+| Bong bóng tốc độ › | bubble prefs | Sub-page with every bubble setting |
+| Thanh tab ứng dụng › | `appBarAutoHide` | Bar at the top of the car screen: ✕, swap sides, app icons; hides after 3/5/10 s or never; a pill brings it back |
+| Mở nhanh › | `leftBundleID`, `rightBundleID`, `experimentalSingleApp` | The layout opened on connect |
+| Màn hình trên xe › | `splitRatio`, `showDivider` | Split and divider |
+| Ứng dụng › n/12 | `carApps` | Apps in the car's app bar: tap = ô 1, hold = ô 2; an app already on screen swaps sides |
+
+Debug log (Nâng cao › Xem log debug) has share, reload and clear buttons.
+
 ### Fail-safes (why it's now safe to try)
 
 - 0.8.1: **"Đang bật" on Trang chủ** (`carPlayAutoHost`), like SidePlay2's

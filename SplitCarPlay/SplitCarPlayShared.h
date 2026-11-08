@@ -39,6 +39,10 @@ static inline NSDictionary *SCPDefaultPrefs(void) {
         @"keepSourceAppAlive": @YES,
         @"autoExitSourceApp": @NO,
         @"carPlayAutoHost": @NO, // "Đang bật" on Trang chủ: show the apps on every CarPlay connect
+        @"restoreLastLayout": @YES, // reopen the apps/split last used on the car (carLast* keys)
+        @"autoDimPhone": @NO,       // dim the phone 10 s after the apps show on the car
+        @"appBarAutoHide": @5,      // car app bar hides after N s; 0 = always shown
+        @"carApps": @[],            // up to 12 bundle IDs offered in the car app bar
     };
 }
 
