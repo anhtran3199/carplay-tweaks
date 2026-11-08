@@ -120,7 +120,7 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
     _sectionTitles = @[@"Trạng thái", @"Ứng dụng", @"Bố cục", @"Thẻ tốc độ", @"Ứng dụng nguồn (Vietmap Live)", @"Thử nghiệm: chia màn hình CarPlay thật"];
     _sectionFooters = @[
         @"", @"", @"", @"", @"",
-        @"⚠️ Lần test CarPlay thật gần nhất bị trống màn hình. Chỉ bật mục này nếu bạn chủ động muốn thử lại và chấp nhận rủi ro đó — khi BẬT, mọi bước sẽ được ghi vào log debug bên dưới để biết chính xác bước nào thất bại.",
+        @"⚠️ Chế độ thử 1 lần: công tắc tự TẮT khi bắt đầu một lần thử, nên lần cắm CarPlay sau sẽ trở lại bình thường. Cửa sổ chỉ hiện khi đã có app; nếu sau 6 giây không có app nào thì tự gỡ. Trên màn hình xe: bấm ✕ hoặc giữ 2 ngón tay 1 giây để thoát. Mọi bước được ghi vào log debug.",
     ];
     _sections = @[
         @[ [self rowSwitch:@"Bật tính năng" key:@"enabled"] ],
@@ -137,9 +137,17 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
            [self rowSwitch:@"Hiện nhạc đang phát" key:@"showNowPlaying"] ],
         @[ [self rowSwitch:@"Giữ chạy nền" key:@"keepSourceAppAlive"],
            [self rowSwitch:@"Tự thoát khi rút CarPlay" key:@"autoExitSourceApp" default:NO] ],
-        @[ [self rowSwitch:@"⚠️ Bật thử nghiệm" key:@"experimentalHostingEnabled" default:NO],
+        @[ [self rowSwitch:@"⚠️ Bật thử nghiệm (1 lần)" key:@"experimentalHostingEnabled" default:NO],
+           [self rowSwitch:@"Chỉ 1 app toàn màn hình (ô 1)" key:@"experimentalSingleApp" default:YES],
            [self rowButton:@"Xem log debug" key:@"_viewLog"] ],
     ];
+}
+
+// Re-read prefs each time the tab shows: the tweak turns
+// experimentalHostingEnabled back off by itself after each attempt.
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    [self.tableView reloadData];
 }
 
 - (NSDictionary *)prefs {
