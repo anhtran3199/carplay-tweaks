@@ -638,6 +638,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         slot.application = application;
 
         Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
+        SCPLiveLog(@"  attach %@: creating scene entity", bundleID);
         id entity = nil;
         if ([entityClass instancesRespondToSelector:NSSelectorFromString(@"initWithApplicationForMainDisplay:")]) {
             entity = ((id (*)(id, SEL, id))objc_msgSend)([entityClass alloc], NSSelectorFromString(@"initWithApplicationForMainDisplay:"), application);
@@ -658,13 +659,21 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
             slot.finished = YES;
             return;
         }
-        UIViewController *appVC = ((id (*)(id, SEL, id, id))objc_msgSend)([appVCClass alloc], initSel, bundleID, entity);
+        // A fresh identifier every time. The view controller registers a
+        // presenter on the app's scene under this name, and the previous
+        // session's one may still be registered: reusing the name (it used
+        // to be the bundle ID) crashed SpringBoard on the second start.
+        static NSUInteger presenterCounter = 0;
+        NSString *identifier = [NSString stringWithFormat:@"SplitCarPlayLive-%@-%lu", bundleID, (unsigned long)++presenterCounter];
+        SCPLiveLog(@"  attach %@: creating SBAppViewController %@", bundleID, identifier);
+        UIViewController *appVC = ((id (*)(id, SEL, id, id))objc_msgSend)([appVCClass alloc], initSel, identifier, entity);
         SCPLiveLog(@"  attach %@: appVC=%@", bundleID, appVC);
         if (!appVC) {
             slot.finished = YES;
             return;
         }
 
+        SCPLiveLog(@"  attach %@: setting live mode", bundleID);
         BOOL occl = SCPSendBool(appVC, @"setIgnoresOcclusions:", YES);
         BOOL mode = SCPSendInteger(appVC, @"setRequestedMode:", 2); // 2 = live content (carplay-cast)
         SCPLiveLog(@"  attach %@: setIgnoresOcclusions=%d setRequestedMode=%d", bundleID, occl, mode);

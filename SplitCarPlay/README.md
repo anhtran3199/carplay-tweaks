@@ -71,6 +71,13 @@ Exits: red ✕ over the panes, "■ Dừng", leaving the tab or app, locking the
 phone, or a 12 s watchdog if nothing could be hosted. Every step is logged
 with a `[live]` prefix in `splitcarplay_hosting.log`.
 
+Restarting (0.7.4). After a clean ✕, the next start crashed SpringBoard.
+`SBAppViewController initWithIdentifier:` was given the bundle ID, so the
+second session registered a scene presenter under the same name as the
+first one's, which may still exist. Each view controller now gets a
+unique identifier (`SplitCarPlayLive-<bundle id>-<n>`), and the attach
+steps are logged before they run.
+
 Closing (0.7.3). Tapping ✕ with two apps crashed SpringBoard in 0.7.2,
 which let every app go in the same instant. Now the window hides at once
 and the apps are released one at a time: `setRequestedMode:0`, wait,
