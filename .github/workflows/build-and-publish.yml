@@ -38,7 +38,7 @@ jobs:
       # "latest") fixes that.
       - name: Install a private-framework-patched iOS SDK (for Preferences.framework)
         run: |
-          curl -fsSL -o /tmp/iPhoneOS16.5.sdk.tar.xz \
+          curl -fsSL --retry 6 --retry-delay 20 --retry-all-errors -o /tmp/iPhoneOS16.5.sdk.tar.xz \
             https://github.com/theos/sdks/releases/download/master-146e41f/iPhoneOS16.5.sdk.tar.xz
           mkdir -p "$THEOS/sdks"
           tar -xf /tmp/iPhoneOS16.5.sdk.tar.xz -C "$THEOS/sdks"
