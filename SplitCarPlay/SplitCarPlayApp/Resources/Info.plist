@@ -12,6 +12,18 @@
 	<string>SplitCarPlay</string>
 	<key>CFBundleDisplayName</key>
 	<string>SplitCarPlay</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>AppIcon60x60</string>
+				<string>AppIcon40x40</string>
+				<string>AppIcon29x29</string>
+			</array>
+		</dict>
+	</dict>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleSignature</key>
@@ -21,9 +33,9 @@
 		<string>iPhoneOS</string>
 	</array>
 	<key>CFBundleShortVersionString</key>
-	<string>0.8.2</string>
+	<string>0.8.3</string>
 	<key>CFBundleVersion</key>
-	<string>0.8.2</string>
+	<string>0.8.3</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
 	<key>UIDeviceFamily</key>

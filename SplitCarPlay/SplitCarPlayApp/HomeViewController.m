@@ -4,7 +4,7 @@
 //  One switch, like SidePlay2's: "Đang bật" shows the picked apps on the
 //  car screen every time CarPlay connects (pref carPlayAutoHost, read by
 //  Tweak.xm in SpringBoard). Below it, the CarPlay status SpringBoard
-//  publishes (SCPGetCarPlayState) and the two picked apps.
+//  publishes (SCPGetCarPlayState).
 //
 //  If SpringBoard dies during a CarPlay session, it switches "Đang bật"
 //  off on its next start and sets carPlayCrashNotice, shown here until the
@@ -13,8 +13,6 @@
 #import <UIKit/UIKit.h>
 #import "../SplitCarPlayShared.h"
 
-extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // AppPickerController.m
-extern UIImage *SplitCarPlayAppIcon(NSString *bundleID);                 // AppPickerController.m
 extern void SplitCarPlaySetPref(NSString *key, id value);                // AppPickerController.m
 
 static UIColor *SCPHomeCardColor(void) {
@@ -36,7 +34,7 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
 
 @implementation HomeViewController {
     UIScrollView *_scroll;
-    UIView *_logo;
+    UIImageView *_logo;
     UILabel *_titleLabel;
     UILabel *_versionLabel;
 
@@ -55,13 +53,6 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
     UIView *_statusDot;
     UILabel *_statusLabel;
 
-    UIView *_appsCard;
-    UIImageView *_leftIcon;
-    UILabel *_leftLabel;
-    UIImageView *_rightIcon;
-    UILabel *_rightLabel;
-    UILabel *_hintLabel;
-
     NSTimer *_statusTimer;
 }
 
@@ -74,12 +65,11 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
     [self.view addSubview:_scroll];
 
     // Header: logo, name, version
-    _logo = [[UIView alloc] init];
-    _logo.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
-    _logo.layer.cornerRadius = 12;
-    UIImageView *logoGlyph = SCPHomeSymbolView(@"rectangle.split.2x1.fill", 20, [UIColor whiteColor]);
-    logoGlyph.frame = CGRectMake(0, 0, 48, 48);
-    [_logo addSubview:logoGlyph];
+    // The app icon (Resources/AppIcon60x60@2x.png, drawn by Icon/make_icon.py).
+    _logo = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"AppIcon60x60"]];
+    _logo.layer.cornerRadius = 11;
+    _logo.layer.cornerCurve = kCACornerCurveContinuous;
+    _logo.clipsToBounds = YES;
     [_scroll addSubview:_logo];
 
     _titleLabel = [[UILabel alloc] init];
@@ -150,33 +140,6 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
     _statusLabel.textAlignment = NSTextAlignmentLeft;
     [_statusCard addSubview:_statusLabel];
 
-    // Picked apps
-    _appsCard = [[UIView alloc] init];
-    _appsCard.backgroundColor = SCPHomeCardColor();
-    _appsCard.layer.cornerRadius = 16;
-    [_scroll addSubview:_appsCard];
-    _leftIcon = [[UIImageView alloc] init];
-    _leftIcon.layer.cornerRadius = 7;
-    _leftIcon.clipsToBounds = YES;
-    [_appsCard addSubview:_leftIcon];
-    _leftLabel = [[UILabel alloc] init];
-    _leftLabel.font = [UIFont systemFontOfSize:15];
-    [_appsCard addSubview:_leftLabel];
-    _rightIcon = [[UIImageView alloc] init];
-    _rightIcon.layer.cornerRadius = 7;
-    _rightIcon.clipsToBounds = YES;
-    [_appsCard addSubview:_rightIcon];
-    _rightLabel = [[UILabel alloc] init];
-    _rightLabel.font = [UIFont systemFontOfSize:15];
-    [_appsCard addSubview:_rightLabel];
-
-    _hintLabel = [[UILabel alloc] init];
-    _hintLabel.font = [UIFont systemFontOfSize:12];
-    _hintLabel.textColor = [UIColor secondaryLabelColor];
-    _hintLabel.numberOfLines = 0;
-    _hintLabel.text = @"Đổi app ở tab Trên xe hoặc Mô phỏng. Trên màn hình xe: bấm ✕ (góc trên trái) hoặc giữ 2 ngón tay 1 giây để quay về CarPlay bình thường; app sẽ tự hiện lại ở lần cắm xe sau.";
-    [_scroll addSubview:_hintLabel];
-
     [self refresh];
 }
 
@@ -210,16 +173,6 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
     _switchSubtitle.text = on ? @"Cắm CarPlay là app tự hiện trên màn hình xe." : @"Bật để hiện app trên màn hình xe mỗi khi cắm CarPlay.";
     _switchSubtitle.textColor = on ? [UIColor systemGreenColor] : [UIColor secondaryLabelColor];
     _noticeBox.hidden = ![prefs[@"carPlayCrashNotice"] boolValue];
-
-    BOOL single = [prefs[@"experimentalSingleApp"] boolValue];
-    NSString *leftID = prefs[@"leftBundleID"];
-    NSString *rightID = prefs[@"rightBundleID"];
-    _leftIcon.image = SplitCarPlayAppIcon(leftID);
-    _rightIcon.image = SplitCarPlayAppIcon(rightID);
-    _leftLabel.text = [NSString stringWithFormat:@"Ô 1: %@", SplitCarPlayDisplayNameForBundleID(leftID) ?: @"(chưa chọn)"];
-    _rightLabel.text = single ? @"Ô 2: (tắt, đang để 1 app toàn màn hình)"
-                              : [NSString stringWithFormat:@"Ô 2: %@", SplitCarPlayDisplayNameForBundleID(rightID) ?: @"(chưa chọn)"];
-    _rightLabel.textColor = single ? [UIColor secondaryLabelColor] : [UIColor labelColor];
     [self refreshStatus];
     [self.view setNeedsLayout];
 }
@@ -294,19 +247,7 @@ static UIImageView *SCPHomeSymbolView(NSString *name, CGFloat size, UIColor *tin
     CGFloat statusX = (w - statusW - 14) / 2.0;
     _statusDot.frame = CGRectMake(statusX, cardH - 40 + 7, 8, 8);
     _statusLabel.frame = CGRectMake(statusX + 14, cardH - 40, statusW, 22);
-    y = CGRectGetMaxY(_statusCard.frame) + 16;
-
-    // Apps card
-    _appsCard.frame = CGRectMake(x, y, w, 104);
-    _leftIcon.frame = CGRectMake(16, 16, 30, 30);
-    _leftLabel.frame = CGRectMake(56, 16, w - 72, 30);
-    _rightIcon.frame = CGRectMake(16, 58, 30, 30);
-    _rightLabel.frame = CGRectMake(56, 58, w - 72, 30);
-    y = CGRectGetMaxY(_appsCard.frame) + 12;
-
-    CGSize hintSize = [_hintLabel sizeThatFits:CGSizeMake(w - 8, CGFLOAT_MAX)];
-    _hintLabel.frame = CGRectMake(x + 4, y, w - 8, hintSize.height);
-    y = CGRectGetMaxY(_hintLabel.frame) + 24;
+    y = CGRectGetMaxY(_statusCard.frame) + 24;
 
     _scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     [self refreshStatus]; // dot colors for the freshly made dots
