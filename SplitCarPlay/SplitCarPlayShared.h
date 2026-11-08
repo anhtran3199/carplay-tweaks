@@ -38,6 +38,7 @@ static inline NSDictionary *SCPDefaultPrefs(void) {
         @"showNowPlaying": @YES,
         @"keepSourceAppAlive": @YES,
         @"autoExitSourceApp": @NO,
+        @"carPlayAutoHost": @NO, // "Đang bật" on Trang chủ: show the apps on every CarPlay connect
     };
 }
 
@@ -218,4 +219,32 @@ static inline BOOL SCPReadLiveResize(double *leftWidth, double *rightX, double *
     *rightWidth = (double)((packed >> 32) & 0xFFFF) / 2.0;
     *final = ((packed >> 63) & 1) != 0;
     return YES;
+}
+
+#pragma mark - CarPlay status for the app's Trang chủ (SpringBoard -> app)
+#define SCP_CARPLAY_STATE_NOTIFICATION "com.example.splitcarplay/carplay-state"
+
+enum {
+    SCPCarPlayStateDisconnected = 0,
+    SCPCarPlayStateConnected = 1, // car connected, apps not shown
+    SCPCarPlayStateShowing = 2,   // apps on the car screen
+};
+
+static inline void SCPSetCarPlayState(uint64_t state) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_CARPLAY_STATE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return;
+    notify_set_state(token, state);
+    notify_post(SCP_CARPLAY_STATE_NOTIFICATION);
+}
+
+static inline uint64_t SCPGetCarPlayState(void) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_CARPLAY_STATE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return SCPCarPlayStateDisconnected;
+    uint64_t state = 0;
+    notify_get_state(token, &state);
+    return state;
 }

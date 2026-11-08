@@ -120,7 +120,7 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
     _sectionTitles = @[@"Trạng thái", @"Ứng dụng", @"Bố cục", @"Thẻ tốc độ", @"Ứng dụng nguồn (Vietmap Live)", @"Thử nghiệm: chia màn hình CarPlay thật"];
     _sectionFooters = @[
         @"", @"", @"", @"", @"",
-        @"⚠️ Chế độ thử 1 lần: công tắc tự TẮT khi bắt đầu một lần thử, nên lần cắm CarPlay sau sẽ trở lại bình thường. Cửa sổ chỉ hiện khi đã có app; nếu sau 6 giây không có app nào thì tự gỡ. Trên màn hình xe: bấm ✕ hoặc giữ 2 ngón tay 1 giây để thoát. Mọi bước được ghi vào log debug.",
+        @"⚠️ Chế độ thử 1 lần: công tắc tự TẮT khi bắt đầu một lần thử, nên lần cắm CarPlay sau sẽ trở lại bình thường. Cửa sổ chỉ hiện khi đã có app; nếu sau 12 giây không có app nào thì tự gỡ. Muốn app tự hiện mỗi lần cắm xe thì dùng công tắc \"Đang bật\" ở Trang chủ. Trên màn hình xe: bấm ✕ hoặc giữ 2 ngón tay 1 giây để thoát. Mọi bước được ghi vào log debug.",
     ];
     _sections = @[
         @[ [self rowSwitch:@"Bật tính năng" key:@"enabled"] ],

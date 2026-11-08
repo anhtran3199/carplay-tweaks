@@ -1494,6 +1494,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     if (!_visible || !self.view.window) return;
     if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
     if ([self liveIsActive]) return;
+    if (SCPGetCarPlayState() == SCPCarPlayStateShowing) {
+        // SpringBoard won't show the same apps in two places.
+        _captionLabel.text = @"App đang hiển thị trên CarPlay, nên Mô phỏng tạm không chạy app thật.";
+        [self.view setNeedsLayout];
+        return;
+    }
     NSDictionary *prefs = SCPCopyPrefs();
     NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");

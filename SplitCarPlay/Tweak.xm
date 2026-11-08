@@ -761,6 +761,10 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 @property (nonatomic, assign) BOOL singleAppMode;        // one app full-width, no split
 @property (nonatomic, assign) BOOL tearingDown;
 @property (nonatomic, assign) NSTimeInterval hostDelay;
+@property (nonatomic, assign) BOOL dismissedUntilReconnect; // ✕ / watchdog: no auto start until the car reconnects
+@property (nonatomic, assign) BOOL lastAutoHost;
+@property (nonatomic, assign) BOOL sessionFromAutoHost;
+- (void)publishCarPlayState;
 @property (nonatomic, assign) NSUInteger sessionGeneration; // invalidates pending callbacks after teardown
 @property (nonatomic, strong) UIButton *carCloseButton;
 + (instancetype)sharedInstance;
@@ -788,30 +792,44 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 }
 
 // Called on CarPlay connect, on every pref change (the app posts reload)
-// and 3 s after SpringBoard starts. A session only STARTS when the
-// one-shot switch "⚠️ Bật thử nghiệm (1 lần)" is on; once running, pref
-// changes only restyle the bubble (the hosted apps stay as they are).
+// and 3 s after SpringBoard starts. A session starts when "Đang bật" on
+// Trang chủ (carPlayAutoHost) is on -- on every connect -- or once when
+// the one-shot test switch "⚠️ Bật thử nghiệm (1 lần)" is on. Once
+// running, pref changes only restyle the bubble.
 - (void)reloadFromPreferences {
     NSDictionary *prefs = [self loadPreferences];
 
     self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
     self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
 
-    BOOL armed = [prefs[@"experimentalHostingEnabled"] boolValue] || self.hostingSessionActive;
+    BOOL autoHost = [prefs[@"carPlayAutoHost"] boolValue];
+    BOOL oneShot = [prefs[@"experimentalHostingEnabled"] boolValue];
+    if (autoHost && !self.lastAutoHost) self.dismissedUntilReconnect = NO; // just switched on
+    self.lastAutoHost = autoHost;
+    if (oneShot) self.dismissedUntilReconnect = NO; // explicit retry
+
+    // A running session ends if "Đang bật" (what started it) goes off.
+    BOOL keepRunning = self.hostingSessionActive && (!self.sessionFromAutoHost || autoHost);
+    BOOL armed = oneShot || (autoHost && !self.dismissedUntilReconnect) || keepRunning;
     if (!armed || ![prefs[@"enabled"] boolValue]) {
         [self teardown]; // no window: just clears flags a crash may have left
+        [self publishCarPlayState];
         return;
     }
     if (self.tearingDown) return;
 
     id carPlayDisplay = getCarPlayDisplay();
+    [self publishCarPlayState];
     if (!carPlayDisplay) return; // not connected to a car yet
 
     if (!self.rootWindow) {
-        // One-shot: turn the switch off BEFORE anything risky, so a hard
-        // crash can't make SpringBoard retry on every respawn. Re-arm it in
-        // the app for each test.
-        SplitCarPlayWritePref(@"experimentalHostingEnabled", @NO);
+        // The one-shot test switch turns itself off BEFORE anything risky.
+        // "Đang bật" stays on; if SpringBoard dies mid-session, the marker
+        // below makes the next SpringBoard start turn it off (%ctor), so a
+        // crash can't repeat on every connect.
+        self.sessionFromAutoHost = !oneShot;
+        if (oneShot) SplitCarPlayWritePref(@"experimentalHostingEnabled", @NO);
+        SplitCarPlayWritePref(@"carPlaySessionActive", @YES);
         SCPSetHostingSessionActive(YES);       // CarPlayEnableHook reads this
         BOOL phonePreviewWasRunning = SCPHostSetCarPlaySessionActive(YES); // closes the phone preview, blocks it meanwhile
         self.hostDelay = phonePreviewWasRunning ? 3.0 : 0.0; // let the phone preview let go of the apps first
@@ -822,6 +840,8 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         if (!self.rootWindow) {
             SCPSetHostingSessionActive(NO);
             SCPHostSetCarPlaySessionActive(NO);
+            SplitCarPlayWritePref(@"carPlaySessionActive", @NO);
+            self.dismissedUntilReconnect = YES;
             return;
         }
         self.hostingSessionActive = YES;
@@ -1104,6 +1124,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
             self.rootWindow.hidden = NO;
             SplitCarPlayHostingLog(@"[car]   window shown");
         }
+        [self publishCarPlayState];
         [self startKeepAlive];
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!slot.hosted) return;
@@ -1216,6 +1237,10 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     }
     SplitCarPlayHostingLog(@"[car] stop");
     self.tearingDown = YES;
+    // ✕, watchdog, no app left: don't auto-start again until the car
+    // reconnects (UIScreenDidDisconnect clears this) or "Đang bật" is
+    // switched off and on.
+    self.dismissedUntilReconnect = YES;
     NSArray<SplitCarPlayCarSlot *> *slots = [self.slots copy] ?: @[];
     self.slots = nil;
     UIWindow *window = self.rootWindow;
@@ -1233,7 +1258,12 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         self.tearingDown = NO;
         SCPSetHostingSessionActive(NO);
         SCPHostSetCarPlaySessionActive(NO);
+        [self publishCarPlayState];
         SplitCarPlayHostingLog(@"[car] stop: done");
+        // Marker cleared a bit later, so a crash right after closing counts.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!self.rootWindow && !self.tearingDown) SplitCarPlayWritePref(@"carPlaySessionActive", @NO);
+        });
         return;
     }
     SplitCarPlayCarSlot *slot = slots[index];
@@ -1270,6 +1300,15 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
             [self releaseSlots:slots index:index + 1];
         });
     });
+}
+
+// For the app's Trang chủ: not connected / connected / apps on the car.
+- (void)publishCarPlayState {
+    uint64_t state = SCPCarPlayStateDisconnected;
+    if (getCarPlayDisplay()) {
+        state = (self.rootWindow && !self.rootWindow.hidden) ? SCPCarPlayStateShowing : SCPCarPlayStateConnected;
+    }
+    if (state != SCPGetCarPlayState()) SCPSetCarPlayState(state);
 }
 
 #pragma mark Speed bubble (data comes from VietmapLiveHook.xm, same dylib)
@@ -1333,6 +1372,18 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 
         SplitCarPlayLoadMediaRemote();
 
+        // SpringBoard died during a CarPlay session: switch "Đang bật" off
+        // so the same thing can't crash it on every connect, and tell the
+        // app (Trang chủ shows it once).
+        NSDictionary *prefs = SCPCopyPrefs();
+        if ([prefs[@"carPlaySessionActive"] boolValue]) {
+            SCPSetPref(@"carPlaySessionActive", @NO);
+            SCPSetPref(@"carPlayAutoHost", @NO);
+            SCPSetPref(@"carPlayCrashNotice", @YES);
+            SplitCarPlayHostingLog(@"[car] SpringBoard restarted during a CarPlay session: \"Đang bật\" switched off");
+        }
+        SCPSetCarPlayState(SCPCarPlayStateDisconnected);
+
         // Re-check whenever a display connects/disconnects (CarPlay plug/unplug)
         // and whenever the user changes a preference.
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenDidConnectNotification
@@ -1346,6 +1397,12 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
                                                              queue:nil
                                                         usingBlock:^(NSNotification *note) {
             [[SplitCarPlayController sharedInstance] teardown];
+            // The car went away: next connect may auto-start again.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (getCarPlayDisplay()) return;
+                [SplitCarPlayController sharedInstance].dismissedUntilReconnect = NO;
+                [[SplitCarPlayController sharedInstance] publishCarPlayState];
+            });
             if (![[SplitCarPlayController sharedInstance] autoExitSourceAppEnabled]) return;
             // Only react to CarPlay going away, not e.g. an AirPlay screen:
             // give the display list a moment to update, then check whether a
