@@ -794,19 +794,27 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     if (!carPlayDisplay) return; // not connected to a car yet
 
     if (!self.rootWindow) {
+        // One-shot: turn the switch off BEFORE the risky calls, so even a
+        // hard crash (not catchable by @try) inside activateOnDisplay:
+        // can't make SpringBoard retry on every respawn. Re-arm it in the
+        // app for each test. Tell CarPlayApp a session is starting first
+        // (CarPlayEnableHook checks this, since the pref is now off).
+        SCPSetHostingSessionActive(YES);
+        SplitCarPlayWritePref(@"experimentalHostingEnabled", @NO);
         [self activateOnDisplay:carPlayDisplay];
         if (!self.rootWindow) return; // activation failed and tore itself down
         self.hostingSessionActive = YES;
-        // One-shot: turn the switch off now, so if this attempt goes wrong
-        // the NEXT CarPlay connect is back to normal without touching the
-        // phone. Re-arm it in the app for each test.
-        SplitCarPlayWritePref(@"experimentalHostingEnabled", @NO);
         [self startWatchdog];
     }
 
-    self.singleAppMode = prefs[@"experimentalSingleApp"] ? [prefs[@"experimentalSingleApp"] boolValue] : YES;
+    self.singleAppMode = [prefs[@"experimentalSingleApp"] boolValue];
     self.dividerView.hidden = self.singleAppMode || ![prefs[@"showDivider"] boolValue];
     self.rightContainer.hidden = self.singleAppMode;
+    if (self.singleAppMode) {
+        // Switching split -> single mid-session: drop the right app too.
+        for (UIView *old in [self.rightContainer.subviews copy]) [old removeFromSuperview];
+        self.rightAppVC = nil;
+    }
 
     // Lay out first so the containers have a real size when hostApp: reads
     // container.bounds (they start at CGRectZero).
@@ -977,6 +985,9 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 
 - (void)teardown {
     self.sessionGeneration++;
+    // Unconditional: also clears a flag left at 1 by a SpringBoard crash
+    // mid-session (notify state outlives the process).
+    SCPSetHostingSessionActive(NO);
     self.hostingSessionActive = NO;
     [self.rootWindow removeFromSuperview];
     self.rootWindow.hidden = YES;

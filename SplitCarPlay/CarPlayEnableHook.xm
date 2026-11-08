@@ -186,7 +186,8 @@ static void SplitCarPlayAddDeclarationsForAllApps(id library) {
     // otherwise just having the tweak installed would add a fake
     // "navigation app" entry for every third-party app on the CarPlay
     // home screen.
-    if (![SCPCopyPrefs()[@"experimentalHostingEnabled"] boolValue]) return library;
+    BOOL armed = [SCPCopyPrefs()[@"experimentalHostingEnabled"] boolValue] || SCPIsHostingSessionActive();
+    if (!armed) return library;
     if (SplitCarPlay_RunningInCarPlayApp() && library) {
         SplitCarPlayAddDeclarationsForAllApps(library);
     }

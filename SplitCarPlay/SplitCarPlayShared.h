@@ -70,6 +70,34 @@ static inline void SCPPostReload(void) {
     notify_post(SCP_RELOAD_NOTIFICATION);
 }
 
+#pragma mark - Hosting session flag (SpringBoard -> CarPlayApp)
+//
+//  SpringBoard turns experimentalHostingEnabled off the moment a session
+//  starts (one-shot), which is usually BEFORE CarPlayApp builds its app
+//  library -- so CarPlayEnableHook can't rely on the pref alone. SpringBoard
+//  also raises this notify state for the duration of the session.
+//
+#define SCP_HOSTING_SESSION_NOTIFICATION "com.example.splitcarplay/hosting-session"
+
+static inline void SCPSetHostingSessionActive(BOOL active) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_HOSTING_SESSION_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return;
+    notify_set_state(token, active ? 1 : 0);
+    notify_post(SCP_HOSTING_SESSION_NOTIFICATION);
+}
+
+static inline BOOL SCPIsHostingSessionActive(void) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_HOSTING_SESSION_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return NO;
+    uint64_t state = 0;
+    notify_get_state(token, &state);
+    return state != 0;
+}
+
 #pragma mark - Vietmap speed state over Darwin notify
 //
 //  Vietmap Live is a sandboxed App Store app, so writing a file into
@@ -84,8 +112,9 @@ static inline void SCPPostReload(void) {
 #define SCP_SPEED_STATE_NOTIFICATION "com.example.splitcarplay/vietmap-state"
 
 static inline uint64_t SCPEncodeSpeedState(double speed, double limit, BOOL overLimit, NSTimeInterval timestamp) {
-    uint64_t s = speed >= 0 ? (uint64_t)MIN(4094.0, speed) + 1 : 0;
-    uint64_t l = limit > 0 ? (uint64_t)MIN(4094.0, limit) + 1 : 0;
+    // Round (not truncate) to match the file path's "%.0f".
+    uint64_t s = speed >= 0 ? (uint64_t)llround(MIN(4094.0, speed)) + 1 : 0;
+    uint64_t l = limit > 0 ? (uint64_t)llround(MIN(4094.0, limit)) + 1 : 0;
     return (s & 0xFFF) | ((l & 0xFFF) << 12) | ((uint64_t)(overLimit ? 1 : 0) << 24) | ((uint64_t)(uint32_t)timestamp << 32);
 }
 
