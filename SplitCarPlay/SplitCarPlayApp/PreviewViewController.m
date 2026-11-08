@@ -923,12 +923,13 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     BOOL _bubbleWasAdjusted; // once the bubble's been dragged, stop re-centering it every layout pass
     BOOL _bubbleHiddenLocally; // edge-handle toggle; preview only, never written to prefs
 
-    // "Chạy thật": real apps hosted over the panes by SpringBoard
-    // (LivePreview.xm). State comes back through SCPGetLiveState().
-    UIButton *_liveButton;
-    UISwitch *_liveBothSwitch;
-    UILabel *_liveBothLabel;
+    // Real apps hosted over the panes by SpringBoard (LivePreview.xm),
+    // started automatically while this tab is on screen. State comes back
+    // through SCPGetLiveState().
     NSTimer *_liveTimer;
+    BOOL _visible;          // between viewDidAppear and viewWillDisappear
+    BOOL _autoStartPending; // a restart is coming, so a stop isn't the user's ✕
+    BOOL _singleThisVisit;  // SpringBoard crashed with 2 apps last time: run ô 1 only
     uint64_t _shownLiveState;
 
     // Looked up once per refresh (display-name lookup walks every
@@ -1020,28 +1021,10 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _captionLabel.text = nil; // only used for errors and warnings
     [self.view addSubview:_captionLabel];
 
-    _liveButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    _liveButton.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
-    _liveButton.layer.cornerRadius = 18;
-    _liveButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-    [_liveButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
-    [_liveButton addTarget:self action:@selector(liveButtonTapped) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:_liveButton];
-
-    _liveBothLabel = [[UILabel alloc] init];
-    _liveBothLabel.text = @"2 app";
-    _liveBothLabel.font = [UIFont systemFontOfSize:14];
-    _liveBothLabel.textColor = [UIColor colorWithWhite:0.25 alpha:1];
-    _liveBothLabel.textAlignment = NSTextAlignmentRight;
-    [self.view addSubview:_liveBothLabel];
-
-    _liveBothSwitch = [[UISwitch alloc] init];
-    _liveBothSwitch.on = [prefs[@"livePreviewBoth"] boolValue];
-    [_liveBothSwitch addTarget:self action:@selector(liveBothChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:_liveBothSwitch];
-
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidEnterBackground)
                                                  name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scheduleAutoStart)
+                                                 name:UIApplicationDidBecomeActiveNotification object:nil];
     [self updateLiveUI];
 
     _bubble = [[PreviewBubbleView alloc] initWithFrame:CGRectZero];
@@ -1141,8 +1124,17 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _liveTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updateLiveUI) userInfo:nil repeats:YES];
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    _visible = YES;
+    [self scheduleAutoStart]; // the real apps open as soon as the tab is on screen
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
+    _visible = NO;
+    _singleThisVisit = NO;
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoStartLive) object:nil];
     [self stopLiveIfRunning]; // never leave hosted apps floating over another tab
     [_liveTimer invalidate];
     _liveTimer = nil;
@@ -1160,7 +1152,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     // Car screen height ~0.95 x width, but never so tall that the
     // controls + caption below get pushed under the (floating) tab bar.
     CGFloat captionH = _captionLabel.text.length ? MIN(64, ceil([_captionLabel sizeThatFits:CGSizeMake(contentW, CGFLOAT_MAX)].height)) : 0;
-    CGFloat controlsBlockH = 14 + 36 + (captionH > 0 ? 10 + captionH : 0) + 8;
+    CGFloat controlsBlockH = (captionH > 0 ? 10 + captionH : 0) + 8;
     CGFloat maxCarH = bounds.size.height - self.view.safeAreaInsets.bottom - paneTop - controlsBlockH;
     CGFloat carH = floor(MIN(contentW * 0.95, maxCarH));
     carH = MAX(carH, 200);
@@ -1209,12 +1201,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         _bubble.center = CGPointMake(bubbleX + bubbleW / 2.0, paneTop + kSCPPaneBarHeight + 8 + bubbleH / 2.0);
     }
 
-    CGFloat liveY = CGRectGetMaxY(_leftPane.frame) + 14;
-    CGSize switchSize = _liveBothSwitch.intrinsicContentSize;
-    _liveBothSwitch.frame = CGRectMake(side + contentW - switchSize.width, liveY + floor((36 - switchSize.height) / 2.0), switchSize.width, switchSize.height);
-    _liveBothLabel.frame = CGRectMake(CGRectGetMinX(_liveBothSwitch.frame) - 58, liveY, 50, 36);
-    _liveButton.frame = CGRectMake(side, liveY, CGRectGetMinX(_liveBothLabel.frame) - side - 10, 36);
-    _captionLabel.frame = CGRectMake(side, liveY + 36 + 10, contentW, captionH);
+    _captionLabel.frame = CGRectMake(side, CGRectGetMaxY(_leftPane.frame) + 10, contentW, captionH);
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
@@ -1438,16 +1425,16 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
     _styleControl.selectedSegmentIndex = [prefs[@"bubbleStyle"] integerValue]; // may have changed in "Trên xe"
     _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
-    _liveBothSwitch.on = [prefs[@"livePreviewBoth"] boolValue]; // SpringBoard may have turned it off
 
     // Set by SpringBoard when it restarted in the middle of "Chạy thật"
     // (LivePreview.xm %ctor). Shown once.
     NSInteger crashNotice = [prefs[@"livePreviewCrashNotice"] integerValue];
     if (crashNotice) {
         SplitCarPlaySetPref(@"livePreviewCrashNotice", @0);
+        if (crashNotice == 2) _singleThisVisit = YES;
         _captionLabel.text = crashNotice == 2
-            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode). Đã tự tắt \"2 app\", hãy chạy 1 app. Gửi file splitcarplay_hosting.log để sửa."
-            : @"Lần trước \"Chạy thật\" làm SpringBoard bị lỗi. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode), nên lần này chỉ chạy app ô 1. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa."
+            : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
     }
 
     // Newer of the shared file and the notify-state copy (the file may be
@@ -1466,6 +1453,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         [_bubble applySpeedText:@"45" overLimit:NO isLive:NO];
     }
     [self.view setNeedsLayout];
+    [self scheduleAutoStart]; // (re)open the real apps for the current picks
 }
 
 #pragma mark - "Chạy thật" (LivePreview.xm in SpringBoard)
@@ -1490,37 +1478,33 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     return [pane convertRect:rect toView:nil];
 }
 
-- (void)liveBothChanged:(UISwitch *)sender {
-    SplitCarPlaySetPref(@"livePreviewBoth", @(sender.on));
+// Debounced: refresh can run several times in a row (appear, pick, swap).
+- (void)scheduleAutoStart {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoStartLive) object:nil];
+    _autoStartPending = YES;
+    [self performSelector:@selector(autoStartLive) withObject:nil afterDelay:0.4];
 }
 
-- (void)liveButtonTapped {
-    if ([self liveIsActive]) {
-        notify_post(SCP_LIVE_STOP_NOTIFICATION);
-        return;
-    }
+// Opens the picked apps for real: ô 1 always, ô 2 too when it has a
+// different app. Nothing to do without an app in ô 1 (the pane shows its
+// picker). ✕ stops it until the next refresh (↻, a new pick, or coming
+// back to this tab).
+- (void)autoStartLive {
+    _autoStartPending = NO;
+    if (!_visible || !self.view.window) return;
+    if ([UIApplication sharedApplication].applicationState != UIApplicationStateActive) return;
+    if ([self liveIsActive]) return;
     NSDictionary *prefs = SCPCopyPrefs();
-    if (SCPStringPref(prefs, @"leftBundleID").length == 0) {
-        _captionLabel.text = @"Chọn app cho ô 1 trước đã.";
-        [self.view setNeedsLayout];
-        return;
-    }
-    if (_liveBothSwitch.on && SCPStringPref(prefs, @"rightBundleID").length == 0) {
-        _captionLabel.text = @"Chọn app cho ô 2 trước, hoặc tắt \"2 app\".";
-        [self.view setNeedsLayout];
-        return;
-    }
-    if (_liveBothSwitch.on && [SCPStringPref(prefs, @"leftBundleID") isEqualToString:SCPStringPref(prefs, @"rightBundleID")]) {
-        _captionLabel.text = @"Ô 1 và ô 2 đang là cùng một app. Chọn app khác cho ô 2, hoặc tắt \"2 app\".";
-        [self.view setNeedsLayout];
-        return;
-    }
+    NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
+    NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
+    if (leftID.length == 0) return;
+    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID] && !_singleThisVisit;
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
     [self.view layoutIfNeeded];
     SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([self liveContentRectOfPane:_leftPane]));
     SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([self liveContentRectOfPane:_rightPane]));
-    SCPSetPref(@"livePreviewBoth", @(_liveBothSwitch.on));
+    SCPSetPref(@"livePreviewBoth", @(both));
     // The app's bubble ends up under the hosted apps, so SpringBoard draws
     // its own on top, at this bubble's screen position and size.
     // Same for the left-edge show/hide handle, which the hosted apps cover.
@@ -1538,17 +1522,6 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
 - (void)updateLiveUI {
     uint64_t state = SCPGetLiveState();
-    NSString *title = @"▶  Chạy thật";
-    switch (state) {
-        case SCPLiveStateStarting: title = @"Đang mở…"; break;
-        case SCPLiveStateRunning: title = @"■  Dừng"; break;
-        case SCPLiveStateFailed: title = @"▶  Thử lại"; break;
-        default: break;
-    }
-    [_liveButton setTitle:title forState:UIControlStateNormal];
-    _liveButton.backgroundColor = state == SCPLiveStateRunning
-        ? [UIColor colorWithRed:1.0 green:0.30 blue:0.27 alpha:1]
-        : [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
     BOOL live = state == SCPLiveStateStarting || state == SCPLiveStateRunning;
     _bubble.hidden = _bubbleHiddenLocally || live; // SpringBoard draws it on top while live
     if (state == _shownLiveState) return;
@@ -1557,7 +1530,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     if (wasLive && !live) [self restoreBubbleFromLive];
     switch (state) {
         case SCPLiveStateStarting:
-            _captionLabel.text = nil; // the button says "Đang mở…"
+            _captionLabel.text = nil;
             break;
         case SCPLiveStateRunning:
             _captionLabel.text = nil;
@@ -1566,7 +1539,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
             _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
             break;
         default:
-            _captionLabel.text = nil;
+            // Closed with ✕ while on screen: say how to get it back.
+            _captionLabel.text = (wasLive && _visible && !_autoStartPending) ? @"Đã tắt app thật. Bấm nút ↻ xanh ở khung để mở lại." : nil;
             break;
     }
     [self.view setNeedsLayout];

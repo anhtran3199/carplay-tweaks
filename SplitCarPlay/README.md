@@ -55,9 +55,11 @@ build can use the right one. The app may also need to be launched first.
 
 ## Live preview on the phone ("Chạy thật", 0.7.0, experimental)
 
-App → Mô phỏng → **▶ Chạy thật** runs the picked app(s) for real inside the
-preview panes, on the phone screen. Switch on "2 app" for both panes
-(start with one: two live apps is a lot for 2 GB of RAM).
+Opening App → Mô phỏng runs the picked apps for real inside the preview
+panes, on the phone screen (0.7.6: automatic, no button or "2 app" switch).
+Ô 1 always, ô 2 too when it holds a different app. Picking/swapping/
+clearing an app or ↻ restarts it; ✕ stops it until then; leaving the tab
+or the app stops it. After a 2-app crash, the next visit runs ô 1 only.
 
 `LivePreview.xm` (SpringBoard only) launches each app suspended
 (`FBSSystemService`), wraps its main-display scene in an
