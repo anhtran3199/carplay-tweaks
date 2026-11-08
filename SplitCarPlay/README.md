@@ -48,9 +48,16 @@ Still unknown until a car test (all logged with a `[car]` prefix):
 
 ### Fail-safes (why it's now safe to try)
 
-- Off unless "⚠️ Bật thử nghiệm (1 lần)" is switched on in the app. The
-  switch turns itself **off** as soon as an attempt starts, so a failed
-  attempt can't repeat on the next CarPlay connect.
+- 0.8.1: **"Đang bật" on Trang chủ** (`carPlayAutoHost`), like SidePlay2's
+  switch, shows the apps on every CarPlay connect. ✕ / the watchdog stop
+  it until the car reconnects (or the switch goes off and on), so a pref
+  change doesn't reopen it. `carPlaySessionActive` is set while a car
+  session runs; if a SpringBoard start finds it set, SpringBoard died
+  mid-session: it switches "Đang bật" off and Trang chủ shows a notice
+  (`carPlayCrashNotice`). SpringBoard publishes not connected / connected
+  / showing (`SCP_CARPLAY_STATE_NOTIFICATION`) for Trang chủ's status.
+- Or the one-shot "⚠️ Bật thử nghiệm (1 lần)" in Trên xe: it turns itself
+  **off** as soon as an attempt starts.
 - The CarPlay window stays hidden until an app view with a real size is
   attached. If nothing is hosted within **12 seconds**, it's torn down.
 - On the car screen: a **✕** button (top-left) and a **two-finger long
