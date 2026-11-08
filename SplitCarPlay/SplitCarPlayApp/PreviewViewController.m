@@ -903,6 +903,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 @interface PreviewViewController : UIViewController <UIGestureRecognizerDelegate>
 @end
 
+static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh lần cuối của từng app. Bấm \"Chạy thật\" để mở app thật trong khung (thử nghiệm). Kéo thanh ≡ để đổi tỉ lệ chia; kéo thẻ tốc độ để di chuyển, chụm 2 ngón để đổi cỡ.";
+
 @implementation PreviewViewController {
     UILabel *_headingLabel;
     UIView *_carScreenFrame;
@@ -921,6 +923,14 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     CGFloat _dragStartRatio;
     BOOL _bubbleWasAdjusted; // once the bubble's been dragged, stop re-centering it every layout pass
     BOOL _bubbleHiddenLocally; // edge-handle toggle; preview only, never written to prefs
+
+    // "Chạy thật": real apps hosted over the panes by SpringBoard
+    // (LivePreview.xm). State comes back through SCPGetLiveState().
+    UIButton *_liveButton;
+    UISwitch *_liveBothSwitch;
+    UILabel *_liveBothLabel;
+    NSTimer *_liveTimer;
+    uint64_t _shownLiveState;
 
     // Looked up once per refresh (display-name lookup walks every
     // installed app), reused by the "Gần đây" empty state on every layout
@@ -1008,8 +1018,32 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = @"Khung trên chỉ là ảnh chụp tĩnh lần cuối của từng app (không bấm vào app được). Kéo thanh ≡ ở giữa để đổi tỉ lệ chia; kéo thẻ tốc độ để di chuyển, chụm 2 ngón để đổi cỡ.";
+    _captionLabel.text = kSCPIdleCaption;
     [self.view addSubview:_captionLabel];
+
+    _liveButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    _liveButton.backgroundColor = [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
+    _liveButton.layer.cornerRadius = 18;
+    _liveButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    [_liveButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    [_liveButton addTarget:self action:@selector(liveButtonTapped) forControlEvents:UIControlEventTouchUpInside];
+    [self.view addSubview:_liveButton];
+
+    _liveBothLabel = [[UILabel alloc] init];
+    _liveBothLabel.text = @"2 app";
+    _liveBothLabel.font = [UIFont systemFontOfSize:14];
+    _liveBothLabel.textColor = [UIColor colorWithWhite:0.25 alpha:1];
+    _liveBothLabel.textAlignment = NSTextAlignmentRight;
+    [self.view addSubview:_liveBothLabel];
+
+    _liveBothSwitch = [[UISwitch alloc] init];
+    _liveBothSwitch.on = [prefs[@"livePreviewBoth"] boolValue];
+    [_liveBothSwitch addTarget:self action:@selector(liveBothChanged:) forControlEvents:UIControlEventValueChanged];
+    [self.view addSubview:_liveBothSwitch];
+
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidEnterBackground)
+                                                 name:UIApplicationDidEnterBackgroundNotification object:nil];
+    [self updateLiveUI];
 
     _bubble = [[PreviewBubbleView alloc] initWithFrame:CGRectZero];
     [self.view addSubview:_bubble];
@@ -1081,6 +1115,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     if (usableWidth <= 0) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _dragStartRatio = _splitRatio > 0 ? _splitRatio : 0.5;
+        [self stopLiveIfRunning]; // the hosted windows wouldn't follow the new split
     }
     CGFloat deltaRatio = [gesture translationInView:self.view].x / usableWidth;
     _splitRatio = MAX(0.2, MIN(0.8, _dragStartRatio + deltaRatio));
@@ -1097,6 +1132,15 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     [super viewWillAppear:animated];
     self.navigationController.navigationBarHidden = YES; // this tab only -- the big _headingLabel replaces it, matching the reference screenshots
     [self refresh]; // picked app / live Vietmap data may have changed since last time
+    [_liveTimer invalidate];
+    _liveTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updateLiveUI) userInfo:nil repeats:YES];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    [self stopLiveIfRunning]; // never leave hosted apps floating over another tab
+    [_liveTimer invalidate];
+    _liveTimer = nil;
 }
 
 - (void)viewDidLayoutSubviews {
@@ -1111,7 +1155,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     // Car screen height ~0.95 x width, but never so tall that the
     // controls + caption below get pushed under the (floating) tab bar.
     CGFloat captionH = MIN(64, ceil([_captionLabel sizeThatFits:CGSizeMake(contentW, CGFLOAT_MAX)].height));
-    CGFloat controlsBlockH = 18 + 32 + 10 + 32 + 10 + captionH + 8;
+    CGFloat controlsBlockH = 14 + 36 + 18 + 32 + 10 + 32 + 10 + captionH + 8;
     CGFloat maxCarH = bounds.size.height - self.view.safeAreaInsets.bottom - paneTop - controlsBlockH;
     CGFloat carH = floor(MIN(contentW * 0.95, maxCarH));
     carH = MAX(carH, 200);
@@ -1160,7 +1204,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         _bubble.center = CGPointMake(bubbleX + bubbleW / 2.0, paneTop + kSCPPaneBarHeight + 8 + bubbleH / 2.0);
     }
 
-    _styleControl.frame = CGRectMake(side, CGRectGetMaxY(_leftPane.frame) + 18, contentW, 32);
+    CGFloat liveY = CGRectGetMaxY(_leftPane.frame) + 14;
+    CGSize switchSize = _liveBothSwitch.intrinsicContentSize;
+    _liveBothSwitch.frame = CGRectMake(side + contentW - switchSize.width, liveY + floor((36 - switchSize.height) / 2.0), switchSize.width, switchSize.height);
+    _liveBothLabel.frame = CGRectMake(CGRectGetMinX(_liveBothSwitch.frame) - 58, liveY, 50, 36);
+    _liveButton.frame = CGRectMake(side, liveY, CGRectGetMinX(_liveBothLabel.frame) - side - 10, 36);
+    _styleControl.frame = CGRectMake(side, liveY + 36 + 18, contentW, 32);
     _positionControl.frame = CGRectMake(side, CGRectGetMaxY(_styleControl.frame) + 10, contentW, 32);
     _captionLabel.frame = CGRectMake(side, CGRectGetMaxY(_positionControl.frame) + 10, contentW, captionH);
 }
@@ -1351,6 +1400,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 }
 
 - (void)refresh {
+    [self stopLiveIfRunning]; // the picked apps or panes may be changing
     NSDictionary *prefs = SCPCopyPrefs();
     NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
@@ -1401,6 +1451,89 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         [_bubble applySpeedText:@"45" overLimit:NO isLive:NO];
     }
     [self.view setNeedsLayout];
+}
+
+#pragma mark - "Chạy thật" (LivePreview.xm in SpringBoard)
+
+- (BOOL)liveIsActive {
+    uint64_t state = SCPGetLiveState();
+    return state == SCPLiveStateStarting || state == SCPLiveStateRunning;
+}
+
+- (void)stopLiveIfRunning {
+    if ([self liveIsActive]) notify_post(SCP_LIVE_STOP_NOTIFICATION);
+}
+
+- (void)appDidEnterBackground {
+    [self stopLiveIfRunning];
+}
+
+- (void)liveBothChanged:(UISwitch *)sender {
+    SplitCarPlaySetPref(@"livePreviewBoth", @(sender.on));
+}
+
+- (void)liveButtonTapped {
+    if ([self liveIsActive]) {
+        notify_post(SCP_LIVE_STOP_NOTIFICATION);
+        return;
+    }
+    NSDictionary *prefs = SCPCopyPrefs();
+    if (SCPStringPref(prefs, @"leftBundleID").length == 0) {
+        _captionLabel.text = @"Chọn app cho ô 1 trước đã.";
+        return;
+    }
+    if (_liveBothSwitch.on && SCPStringPref(prefs, @"rightBundleID").length == 0) {
+        _captionLabel.text = @"Chọn app cho ô 2 trước, hoặc tắt \"2 app\".";
+        return;
+    }
+    // Content area of each pane (below its title bar), in screen points.
+    // This app is full screen, so window coordinates are screen coordinates.
+    [self.view layoutIfNeeded];
+    CGRect leftRect = CGRectMake(0, kSCPPaneBarHeight, _leftPane.bounds.size.width, _leftPane.bounds.size.height - kSCPPaneBarHeight);
+    CGRect rightRect = CGRectMake(0, kSCPPaneBarHeight, _rightPane.bounds.size.width, _rightPane.bounds.size.height - kSCPPaneBarHeight);
+    SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([_leftPane convertRect:leftRect toView:nil]));
+    SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([_rightPane convertRect:rightRect toView:nil]));
+    SCPSetPref(@"livePreviewBoth", @(_liveBothSwitch.on));
+    SCPSetLiveState(SCPLiveStateStarting); // SpringBoard overwrites this; shows feedback right away
+    notify_post(SCP_LIVE_START_NOTIFICATION);
+    [self updateLiveUI];
+}
+
+- (void)updateLiveUI {
+    uint64_t state = SCPGetLiveState();
+    NSString *title = @"▶  Chạy thật";
+    switch (state) {
+        case SCPLiveStateStarting: title = @"Đang mở…"; break;
+        case SCPLiveStateRunning: title = @"■  Dừng"; break;
+        case SCPLiveStateFailed: title = @"▶  Thử lại"; break;
+        default: break;
+    }
+    [_liveButton setTitle:title forState:UIControlStateNormal];
+    _liveButton.backgroundColor = state == SCPLiveStateRunning
+        ? [UIColor colorWithRed:1.0 green:0.30 blue:0.27 alpha:1]
+        : [UIColor colorWithRed:0.0 green:0.48 blue:1.0 alpha:1];
+    if (state == _shownLiveState) return;
+    _shownLiveState = state;
+    switch (state) {
+        case SCPLiveStateStarting:
+            _captionLabel.text = @"Đang mở app thật… (tự huỷ sau 12 giây nếu không được)";
+            break;
+        case SCPLiveStateRunning:
+            _captionLabel.text = @"App đang chạy thật trong khung, bấm vào được. Bấm ✕ đỏ hoặc \"Dừng\" để thoát.";
+            break;
+        case SCPLiveStateFailed:
+            _captionLabel.text = @"Không mở được app thật. Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
+            break;
+        default:
+            _captionLabel.text = kSCPIdleCaption;
+            break;
+    }
+    [self.view setNeedsLayout];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+    [_liveTimer invalidate];
 }
 
 @end

@@ -7,7 +7,7 @@ INSTALL_TARGET_PROCESSES = SpringBoard CarPlayApp
 include $(THEOS)/makefiles/common.mk
 
 TWEAK_NAME = SplitCarPlay
-SplitCarPlay_FILES = Tweak.xm VietmapLiveHook.xm CarPlayEnableHook.xm
+SplitCarPlay_FILES = Tweak.xm LivePreview.xm VietmapLiveHook.xm CarPlayEnableHook.xm
 SplitCarPlay_CFLAGS = -fobjc-arc
 SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore AudioToolbox
 # No _PRIVATE_FRAMEWORKS here on purpose: every private class in Tweak.xm is

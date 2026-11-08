@@ -147,3 +147,40 @@ static inline void SCPPublishSpeedState(uint64_t packed) {
     notify_set_state(token, packed);
     notify_post(SCP_SPEED_STATE_NOTIFICATION);
 }
+
+#pragma mark - Live preview on the phone screen (app -> SpringBoard)
+//
+//  The app's "Mô phỏng" tab writes the two panes' screen rects to prefs
+//  (livePreviewLeftFrame / livePreviewRightFrame, NSStringFromCGRect) and
+//  posts START. SpringBoard (LivePreview.xm) hosts the real apps in a
+//  window over those rects and reports progress in the STATE value.
+//
+#define SCP_LIVE_START_NOTIFICATION "com.example.splitcarplay/live-preview-start"
+#define SCP_LIVE_STOP_NOTIFICATION "com.example.splitcarplay/live-preview-stop"
+#define SCP_LIVE_STATE_NOTIFICATION "com.example.splitcarplay/live-preview-state"
+
+enum {
+    SCPLiveStateIdle = 0,
+    SCPLiveStateStarting = 1,
+    SCPLiveStateRunning = 2,
+    SCPLiveStateFailed = 3,
+};
+
+static inline void SCPSetLiveState(uint64_t state) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_LIVE_STATE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return;
+    notify_set_state(token, state);
+    notify_post(SCP_LIVE_STATE_NOTIFICATION);
+}
+
+static inline uint64_t SCPGetLiveState(void) {
+    static int token = 0;
+    static BOOL registered = NO;
+    if (!registered) registered = notify_register_check(SCP_LIVE_STATE_NOTIFICATION, &token) == NOTIFY_STATUS_OK;
+    if (!registered) return SCPLiveStateIdle;
+    uint64_t state = 0;
+    notify_get_state(token, &state);
+    return state;
+}
