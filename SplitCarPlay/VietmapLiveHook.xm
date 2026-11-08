@@ -155,6 +155,13 @@ static void vmHandleFlutterCall(FlutterMethodCall *call) {
 %hook FlutterMethodChannel
 
 - (void)setMethodCallHandler:(FlutterMethodCallHandler)handler {
+    // nil means "unregister" -- pass it through untouched. Wrapping nil
+    // would leave a live handler that never calls `result`, so Dart-side
+    // calls on that channel would hang instead of getting NotImplemented.
+    if (!handler) {
+        %orig(nil);
+        return;
+    }
     FlutterMethodCallHandler wrapped = ^(FlutterMethodCall *call, FlutterResult result) {
         @try {
             vmHandleFlutterCall(call);
@@ -163,7 +170,7 @@ static void vmHandleFlutterCall(FlutterMethodCall *call) {
         }
         // Always forward to Vietmap Live's own handler, unmodified, so the
         // app keeps working exactly as if we weren't here.
-        if (handler) handler(call, result);
+        handler(call, result);
     };
     %orig(wrapped);
 }
@@ -186,18 +193,20 @@ static void vmHandleFlutterCall(FlutterMethodCall *call) {
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        if (!SplitCarPlay_RunningInVietmapLive()) return;
-
         // Posted by Tweak.xm (same dylib, CarPlayApp/springboard side) when
         // CarPlay disconnects and "Auto-Close Vietmap Live on CarPlay
-        // Disconnect" is on. Vietmap Live calling exit() on itself is a
-        // normal, safe app-initiated quit — not a crash/force-kill.
+        // Disconnect" is on. Only quits while Vietmap Live is in the
+        // background -- never yank the app out from under someone who is
+        // looking at it on the phone.
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,
             (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
                                         const void *object, CFDictionaryRef userInfo) {
-                exit(0);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if ([UIApplication sharedApplication].applicationState == UIApplicationStateActive) return;
+                    exit(0);
+                });
             },
             (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
             NULL,

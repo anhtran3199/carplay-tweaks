@@ -772,15 +772,21 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     // /var/mobile/Library/Logs/splitcarplay_hosting.log (see
     // SplitCarPlayHostingLog) so a next real-CarPlay test actually
     // produces debuggable evidence instead of just "blank again."
-    NSDictionary *earlyPrefs = [self loadPreferences];
-    if (![earlyPrefs[@"experimentalHostingEnabled"] boolValue]) {
+    NSDictionary *prefs = [self loadPreferences];
+
+    // Settings that don't depend on the CarPlay window -- read them before
+    // the experimental gate so they work even while hosting is off.
+    self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
+    self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
+    // Clamp like the divider pan does: a missing/0 value would otherwise
+    // give negative container widths.
+    double ratio = [prefs[@"splitRatio"] doubleValue];
+    self.splitRatio = (ratio > 0) ? MAX(0.2, MIN(0.8, ratio)) : 0.5;
+
+    if (![prefs[@"experimentalHostingEnabled"] boolValue]) {
         [self teardown];
         return;
     }
-
-    NSDictionary *prefs = [self loadPreferences];
-    self.splitRatio = [prefs[@"splitRatio"] doubleValue];
-    self.dividerView.hidden = ![prefs[@"showDivider"] boolValue];
 
     if (![prefs[@"enabled"] boolValue]) {
         [self teardown];
@@ -793,6 +799,8 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     if (!self.rootWindow) {
         [self activateOnDisplay:carPlayDisplay];
     }
+    // After activateOnDisplay: -- before it, dividerView doesn't exist yet.
+    self.dividerView.hidden = ![prefs[@"showDivider"] boolValue];
 
     [self hostApp:prefs[@"leftBundleID"] inContainer:self.leftContainer replacingExisting:&_leftAppVC];
     [self hostApp:prefs[@"rightBundleID"] inContainer:self.rightContainer replacingExisting:&_rightAppVC];
@@ -804,8 +812,6 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     self.speedBubble.showBattery = [prefs[@"showBattery"] boolValue];
     self.speedBubble.showNowPlaying = [prefs[@"showNowPlaying"] boolValue];
     self.speedBubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
-    self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
-    self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
 
     // Resize to fit whichever style is active (a Card needs more vertical
     // room than a compact Ring or a wide-short Bar), and re-apply the
@@ -1268,14 +1274,18 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
                                                              queue:nil
                                                         usingBlock:^(NSNotification *note) {
             [[SplitCarPlayController sharedInstance] teardown];
-            if ([[SplitCarPlayController sharedInstance] autoExitSourceAppEnabled]) {
+            if (![[SplitCarPlayController sharedInstance] autoExitSourceAppEnabled]) return;
+            // Only react to CarPlay going away, not e.g. an AirPlay screen:
+            // give the display list a moment to update, then check whether a
+            // CarPlay display is still there.
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                if (getCarPlayDisplay()) return;
                 // Handled by VietmapLiveHook.xm (this same dylib, running
-                // inside Vietmap Live's own process) — see its header
-                // comment for why a self-exit is safe.
+                // inside Vietmap Live's own process).
                 CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                                       (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
                                                       NULL, NULL, YES);
-            }
+            });
         }];
 
         CFNotificationCenterAddObserver(
@@ -1304,6 +1314,11 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
             CFNotificationSuspensionBehaviorDeliverImmediately);
 
         // In case CarPlay is already connected when we're injected.
-        [[SplitCarPlayController sharedInstance] reloadFromPreferences];
+        // Deferred, not called inline: %ctor runs before UIApplicationMain,
+        // and creating windows / touching SpringBoard classes that early
+        // can crash on every respawn (-> safe mode).
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [[SplitCarPlayController sharedInstance] reloadFromPreferences];
+        });
     }
 }

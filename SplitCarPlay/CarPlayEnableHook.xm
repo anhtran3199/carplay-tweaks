@@ -181,6 +181,12 @@ static void SplitCarPlayAddDeclarationsForAllApps(id library) {
 
 + (id)_newApplicationLibrary {
     id library = %orig;
+    // Off unless the user explicitly turned on experimental hosting --
+    // otherwise just having the tweak installed would add a fake
+    // "navigation app" entry for every third-party app on the CarPlay
+    // home screen.
+    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.example.splitcarplay.plist"];
+    if (![prefs[@"experimentalHostingEnabled"] boolValue]) return library;
     if (SplitCarPlay_RunningInCarPlayApp() && library) {
         SplitCarPlayAddDeclarationsForAllApps(library);
     }
