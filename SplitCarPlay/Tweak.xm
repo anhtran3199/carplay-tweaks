@@ -43,6 +43,7 @@
 #import <objc/message.h>
 #import <AudioToolbox/AudioToolbox.h>
 #import <dlfcn.h>
+#import "SplitCarPlayShared.h"
 
 #pragma mark - MediaRemote (now-playing widget) — real private API, dlopen'd (no framework stub needed)
 //
@@ -64,10 +65,7 @@ static SplitCarPlayMRGetNowPlayingInfoFunc SplitCarPlayMRGetNowPlayingInfo = NUL
 // process needs to persist on its own rather than just reading what
 // Settings already wrote.
 static void SplitCarPlayWritePref(NSString *key, id value) {
-    NSString *path = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:path] ?: [NSMutableDictionary new];
-    prefs[key] = value;
-    [prefs writeToFile:path atomically:YES];
+    SCPSetPref(key, value); // see SplitCarPlayShared.h
 }
 
 // File-based logging for the CarPlay hosting path (activateOnDisplay:/
@@ -722,7 +720,6 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 @property (nonatomic, strong) UIViewController *leftAppVC;
 @property (nonatomic, strong) UIViewController *rightAppVC;
 @property (nonatomic, strong) SpeedBubbleView *speedBubble;
-@property (nonatomic, strong) UIButton *closeOverlayButton; // live preview overlay only (see showLivePreviewOverlayWithLeft:right:)
 @property (nonatomic, strong) NSTimer *speedBubbleStaleTimer;
 @property (nonatomic, assign) CGFloat splitRatio; // 0..1, left width fraction
 @property (nonatomic, assign) BOOL speedAudioAlertEnabled;
@@ -755,28 +752,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 #pragma mark Preferences
 
 - (NSDictionary *)loadPreferences {
-    NSString *path = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:path];
-    NSMutableDictionary *merged = [@{
-        @"enabled": @YES,
-        @"experimentalHostingEnabled": @NO, // see reloadFromPreferences -- opt-in only, default off since the real CarPlay path is known-broken
-        @"leftBundleID": @"com.apple.Maps",
-        @"rightBundleID": @"com.apple.Music",
-        @"splitRatio": @0.5,
-        @"showDivider": @YES,
-        @"showSpeedBubble": @YES,
-        @"bubbleStyle": @0,
-        @"bubblePosition": @1, // 0 = left, 1 = right (matches the original top-right placement)
-        @"bubbleScale": @1.0, // pinch-to-resize; also a "Bubble Scale" slider in Settings
-        @"speedAudioAlert": @YES,
-        @"showDate": @YES,
-        @"showBattery": @YES,
-        @"showNowPlaying": @YES,
-        @"keepSourceAppAlive": @YES,
-        @"autoExitSourceApp": @NO,
-    } mutableCopy];
-    if (prefs) [merged addEntriesFromDictionary:prefs];
-    return merged;
+    return SCPCopyPrefs(); // defaults + stored values, see SplitCarPlayShared.h
 }
 
 - (void)reloadFromPreferences {
@@ -1008,98 +984,22 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     self.leftAppVC = nil;
     self.rightAppVC = nil;
     self.speedBubble = nil;
-    self.closeOverlayButton = nil;
     self.carCloseButton = nil;
     [self.speedBubbleStaleTimer invalidate];
     self.speedBubbleStaleTimer = nil;
-}
-
-#pragma mark Live preview overlay (Preferences.app only) — EXPERIMENTAL
-
-// Triggered from the Settings "Mô phỏng" screen's new "thử chạy app thật"
-// button. Unlike activateOnDisplay: above (which targets the CarPlay
-// external display via FBSDisplayConfiguration/UIRootSceneWindow), this
-// targets a plain window on the phone's own main screen -- an ordinary,
-// unprivate way any tweak adds a floating overlay (no different from a
-// "floating button" tweak). The only private-API part reused here is the
-// *existing* hostApp:inContainer: below; displaySceneManagerForCurrentDisplay
-// already calls +[SBSceneManagerCoordinator mainDisplaySceneManager] (not
-// anything CarPlay-specific), which should resolve to the phone's own
-// display when called from here instead of from CarPlayApp -- the premise
-// this whole experiment rests on, prompted by evidence that SidePlay's own
-// "Mô phỏng" tab hosts real, live app content without a CarPlay connection.
-- (void)showLivePreviewOverlayWithLeft:(NSString *)leftBundleID right:(NSString *)rightBundleID {
-    // DISABLED -- same hostApp:/displaySceneManagerForCurrentDisplay
-    // mechanism that just failed its first real-CarPlay test (see
-    // reloadFromPreferences above); no reason to believe this Settings-
-    // triggered variant of the identical call would fare any better.
-    // Left in place rather than deleted in case the broader pivot (see
-    // ROADMAP.md) ends up reusing pieces of it.
-    return;
-
-    if (self.rootWindow) return; // already showing
-
-    NSDictionary *prefs = [self loadPreferences];
-    self.splitRatio = [prefs[@"splitRatio"] doubleValue] ?: 0.5;
-
-    self.rootWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
-    self.rootWindow.windowLevel = UIWindowLevelAlert + 1;
-    self.rootWindow.backgroundColor = [UIColor blackColor];
-
-    CGRect bounds = self.rootWindow.bounds;
-    self.leftContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    self.leftContainer.clipsToBounds = YES;
-    self.rightContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    self.rightContainer.clipsToBounds = YES;
-
-    self.dividerView = [[UIView alloc] initWithFrame:CGRectZero];
-    self.dividerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
-    self.dividerView.layer.cornerRadius = 3;
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                           action:@selector(handleDividerPan:)];
-    [self.dividerView addGestureRecognizer:pan];
-    self.dividerView.userInteractionEnabled = YES;
-
-    CGFloat cardWidth = 116, cardHeight = 266;
-    self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - cardWidth - 16,
-                                                                           56, cardWidth, cardHeight)];
-    self.speedBubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
-    self.speedBubble.onScaleChanged = ^(CGFloat scale) {
-        SplitCarPlayWritePref(@"bubbleScale", @(scale));
-    };
-
-    self.closeOverlayButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.closeOverlayButton setTitle:@"✕ Đóng thử nghiệm" forState:UIControlStateNormal];
-    self.closeOverlayButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.6];
-    self.closeOverlayButton.tintColor = [UIColor whiteColor];
-    self.closeOverlayButton.layer.cornerRadius = 8;
-    self.closeOverlayButton.frame = CGRectMake(12, 44, 170, 36);
-    [self.closeOverlayButton addTarget:self action:@selector(hideLivePreviewOverlay)
-                       forControlEvents:UIControlEventTouchUpInside];
-
-    [self.rootWindow addSubview:self.leftContainer];
-    [self.rootWindow addSubview:self.rightContainer];
-    [self.rootWindow addSubview:self.dividerView];
-    [self.rootWindow addSubview:self.speedBubble]; // on top, so it floats over both halves
-    [self.rootWindow addSubview:self.closeOverlayButton]; // topmost -- always reachable to get out
-
-    [self hostApp:leftBundleID inContainer:self.leftContainer replacingExisting:&_leftAppVC];
-    [self hostApp:rightBundleID inContainer:self.rightContainer replacingExisting:&_rightAppVC];
-    [self layoutContainers];
-
-    self.rootWindow.hidden = NO;
-    [self.rootWindow makeKeyAndVisible];
-}
-
-- (void)hideLivePreviewOverlay {
-    [self teardown];
 }
 
 #pragma mark Speed bubble (data comes from VietmapLiveHook.xm, same dylib)
 
 - (void)refreshSpeedBubble {
     if (!self.speedBubble || self.speedBubble.hidden) return;
-    NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
+    // Two possible sources: the shared file (may be blocked by Vietmap
+    // Live's sandbox) and the Darwin-notify state (see
+    // SplitCarPlayShared.h). Use whichever is newer.
+    NSDictionary *fileState = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
+    NSDictionary *notifyState = SCPReadSpeedState();
+    NSDictionary *state = fileState;
+    if ([notifyState[@"timestamp"] doubleValue] > [fileState[@"timestamp"] doubleValue]) state = notifyState;
     [self.speedBubble applyState:state ?: @{}]; // empty state renders as "disconnected"
     [self.speedBubble tick]; // date/battery/now-playing text — see SpeedBubbleView.tick's own comment
 
@@ -1339,49 +1239,6 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     @autoreleasepool {
         NSString *bundleID = [[NSBundle mainBundle] bundleIdentifier];
 
-        if ([bundleID isEqualToString:@"com.apple.Preferences"]) {
-            // EXPERIMENTAL: lets the Settings "Mô phỏng" screen trigger a
-            // real hostApp: attempt in a plain overlay on the phone's own
-            // screen instead of requiring an actual CarPlay connection --
-            // see showLivePreviewOverlayWithLeft:right:'s header comment.
-            SplitCarPlayLoadMediaRemote();
-
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL,
-                (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
-                                            const void *object, CFDictionaryRef userInfo) {
-                    NSDictionary *prefs = [[SplitCarPlayController sharedInstance] loadPreferences];
-                    [[SplitCarPlayController sharedInstance] showLivePreviewOverlayWithLeft:prefs[@"leftBundleID"]
-                                                                                        right:prefs[@"rightBundleID"]];
-                },
-                (__bridge CFStringRef)@"com.example.splitcarplay/show-live-preview",
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately);
-
-            CFNotificationCenterAddObserver(
-                CFNotificationCenterGetDarwinNotifyCenter(),
-                NULL,
-                (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
-                                            const void *object, CFDictionaryRef userInfo) {
-                    [[SplitCarPlayController sharedInstance] hideLivePreviewOverlay];
-                },
-                (__bridge CFStringRef)@"com.example.splitcarplay/hide-live-preview",
-                NULL,
-                CFNotificationSuspensionBehaviorDeliverImmediately);
-
-            // Safety net: don't leave the overlay stuck on top of Settings
-            // if the user leaves the app some other way than the close
-            // button (e.g. the home indicator / app switcher).
-            [[NSNotificationCenter defaultCenter] addObserverForName:UIApplicationDidEnterBackgroundNotification
-                                                                object:nil
-                                                                 queue:nil
-                                                            usingBlock:^(NSNotification *note) {
-                [[SplitCarPlayController sharedInstance] hideLivePreviewOverlay];
-            }];
-            return;
-        }
-
         // The window/hosting code runs in SpringBoard ONLY. The SB* classes
         // hostApp: needs exist only there (in CarPlayApp they're nil, so
         // every attempt failed after an empty window was already up), and
@@ -1443,6 +1300,16 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
                 [[SplitCarPlayController sharedInstance] refreshSpeedBubble];
             },
             (__bridge CFStringRef)kVietmapUpdateDarwinNotification,
+            NULL,
+            CFNotificationSuspensionBehaviorDeliverImmediately);
+        CFNotificationCenterAddObserver(
+            CFNotificationCenterGetDarwinNotifyCenter(),
+            NULL,
+            (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                        const void *object, CFDictionaryRef userInfo) {
+                [[SplitCarPlayController sharedInstance] refreshSpeedBubble];
+            },
+            CFSTR(SCP_SPEED_STATE_NOTIFICATION),
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
 

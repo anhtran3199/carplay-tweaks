@@ -15,14 +15,14 @@
   <p>Chia màn hình CarPlay thành 2 nửa, mỗi nửa chạy 1 app, có divider kéo được và card tốc độ nổi.</p>
 
   <div class="warn">
-    <strong>Trạng thái:</strong> starter project, một phần dùng <code>ADAPT</code> — chưa xác nhận đầy đủ
-    trên thiết bị thật. Phần tạo cửa sổ trên màn hình CarPlay đã đối chiếu với mã nguồn mở thật
-    (carplay-cast); phần host app cụ thể vào từng nửa màn hình cần bạn tự xác nhận bằng class-dump
-    trên máy của bạn. Xem README trong repo để biết chi tiết.
+    <strong>Trạng thái:</strong> chia màn hình trên xe thật <strong>chưa chạy được</strong> và mặc định TẮT.
+    Có thể bật thử trong app (tab "Trên xe" → Thử nghiệm). Mỗi lần bật chỉ có hiệu lực cho 1 lần cắm CarPlay;
+    nếu sau 6 giây không hiện được app thì tự gỡ, và trên màn hình xe luôn có nút ✕ để thoát.
   </div>
 
   <h3>Cấu hình</h3>
-  <p>Settings → SplitCarPlay: chọn app (từ danh sách app đã cài, có icon), tỉ lệ chia, bật/tắt divider và speed card.</p>
+  <p>Mở app <strong>SplitCarPlay</strong> trên màn hình chính (không còn mục trong Settings): chọn app cho từng ô,
+     tỉ lệ chia, kiểu thẻ tốc độ, xem mô phỏng và log debug.</p>
 
   <h3>Speed card</h3>
   <p>Đọc tốc độ + giới hạn tốc độ trực tiếp từ Vietmap Live (hook <code>FlutterMethodChannel</code>,

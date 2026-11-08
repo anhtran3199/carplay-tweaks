@@ -6,10 +6,10 @@
 //  ask was the overall 4-tab shape, not a detailed home dashboard.
 //
 #import <UIKit/UIKit.h>
+#import "../SplitCarPlayShared.h"
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // AppPickerController.m
 
-static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
 
 @interface HomeViewController : UIViewController
 @end
@@ -64,7 +64,7 @@ static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.examp
 }
 
 - (void)refresh {
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    NSDictionary *prefs = SCPCopyPrefs();
     NSString *leftName = SplitCarPlayDisplayNameForBundleID(prefs[@"leftBundleID"]) ?: @"(chưa chọn)";
     NSString *rightName = SplitCarPlayDisplayNameForBundleID(prefs[@"rightBundleID"]) ?: @"(chưa chọn)";
     BOOL enabled = prefs[@"enabled"] ? [prefs[@"enabled"] boolValue] : YES;

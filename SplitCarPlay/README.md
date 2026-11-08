@@ -1,131 +1,115 @@
 # SplitCarPlay
 
-A Theos jailbreak tweak that renders two apps side by side on the physical
-CarPlay display, with a draggable divider. Same category of tweak as
-SidePlay/CarSplit/DashSplit — this is a from-scratch implementation you build
-and adapt yourself, not a copy of any of them.
+A Theos jailbreak tweak + companion app aiming to render two apps side by
+side on the physical CarPlay display, with a draggable divider and a
+floating speed card fed by Vietmap Live. Same category of tweak as
+SidePlay/CarSplit/DashSplit; this is a from-scratch implementation.
+
+Target device so far: iPhone 7, iOS 15.8.8, Dopamine 2 (rootless).
 
 ## Status
 
-The Settings UI (Prefs.bundle — app picker, toggles, speed card wiring)
-has been built, fixed, and tested through several real-device iterations
-and works. The actual CarPlay split-screen window/app-hosting code in
-`Tweak.xm` has **not** been tried on a real CarPlay session yet and is
-split into two tiers, clearly marked in `Tweak.xm`:
+| Part | State |
+|---|---|
+| Companion app (`SplitCarPlayApp/`: Trang chủ / Trên xe / Mô phỏng / Tài khoản) | Builds in CI; not yet confirmed on-device |
+| Speed card data from Vietmap Live (`VietmapLiveHook.xm`) | Written, payload shape still to confirm with the call logger |
+| On-car hosting (`Tweak.xm`) | **Not working yet.** Opt-in, one-shot experiment with fail-safes |
+| "Enable any app" for CarPlay (`CarPlayEnableHook.xm`) | Best-effort reconstruction; only active while the experiment is armed |
 
-- **VERIFIED** — the window-creation path (find the CarPlay `CADisplay` →
-  wrap in `FBSDisplayConfiguration` → create a `UIRootSceneWindow` on it →
-  use `_UISystemGestureManager` for touch routing) is cross-referenced
-  against the open-source (Apache-2.0) tweak
-  [`carplay-cast`](https://github.com/EthanArbuckle/carplay-cast)
-  (`src/CRCarplayWindow.mm`), which does the single-app version of this.
-  High confidence these class/method names are real.
+The Settings-app panel (`Prefs.bundle`) was removed in 0.6.0: the app
+replaced it, and the two copies of the preview screen had drifted apart.
 
-- **ADAPT, but much better grounded now** — hosting a *specific app's*
-  live UI inside your own window (`SBApplicationController` → scene
-  identity → `SBSceneManagerCoordinator` → `SBApplicationSceneHandle` →
-  `SBDeviceApplicationSceneEntity` → `SBAppViewController`) matches names
-  independently cited by `carplay-cast`, by DashSplit's README, **and**
-  by literal ObjC selector strings extracted directly out of a real
-  shipping commercial tweak's binary (SidePlay2.dylib — `ar`/`tar`/regex
-  over its publicly-downloadable .deb, metadata-level extraction, not a
-  disassembly of their logic; see `ROADMAP.md`). That extraction also
-  filled in the biggest previous gap — `SBSceneManagerCoordinator
-  mainDisplaySceneManager` — and confirmed `SBAppViewController.appView`
-  (not the inherited `.view`) as the real content view, plus
-  `setForeground:`/`_updateReferenceSize:andOrientation:` as the likely
-  calls needed to make a hosted scene actually render at the right size
-  and receive touches. The one piece still genuinely unconfirmed is
-  `SBApplicationSceneHandleRequest`'s exact construction API — no
-  init/factory selector for it showed up in that same string extraction,
-  so it's still a plausible guess, not a confirmed one.
+### How on-car hosting works (and what's still unknown)
 
-**You will need to close that last gap yourself** with `class-dump` or Hopper
-against `/System/Library/PrivateFrameworks` and the `CarPlayApp` binary on
-your own jailbroken device, for your installed iOS version. That's standard
-jailbreak-tweak-dev practice (it's exactly how the tweaks above were
-originally built) — I just can't do it without a physical device to inspect.
+All window/hosting code runs **in SpringBoard only**. The `SB*` classes it
+needs (`SBApplicationController`, `SBSceneManagerCoordinator`,
+`SBAppViewController`) don't exist in CarPlayApp; the first hardware test
+ran in CarPlayApp, every step failed, and the empty black window it had
+already shown blanked the CarPlay screen.
+
+The approach (as in the open-source
+[`carplay-cast`](https://github.com/EthanArbuckle/carplay-cast)) is to get
+the app's normal phone scene from `+[SBSceneManagerCoordinator
+mainDisplaySceneManager]` and re-parent its view into a `UIRootSceneWindow`
+on the CarPlay `CADisplay`.
+
+Still unconfirmed on iOS 15: how `SBApplicationSceneHandleRequest` is
+constructed. The code tries `requestForApplication:sceneIdentity:` and
+`defaultRequestForApplication:sceneIdentity:displayIdentity:`; if neither
+exists it writes the class's real method list to the log, so the next
+build can use the right one. The app may also need to be launched first.
+
+### Fail-safes (why it's now safe to try)
+
+- Off unless "⚠️ Bật thử nghiệm (1 lần)" is switched on in the app. The
+  switch turns itself **off** as soon as an attempt starts, so a failed
+  attempt can't repeat on the next CarPlay connect.
+- The CarPlay window stays hidden until an app view with a real size is
+  attached. If nothing is hosted within **6 seconds**, it's torn down.
+- On the car screen: a **✕** button (top-left) and a **two-finger long
+  press** (1 s) both close it and give the normal CarPlay UI back.
+- First milestone is one app full-width ("Chỉ 1 app toàn màn hình",
+  default on, hosts "Ô 1" — Maps if unset). Turn it off to try the split.
+- The first reload after SpringBoard starts is deferred 3 s, so nothing
+  runs before SpringBoard has finished launching.
+
+## Testing on the car
+
+1. Install the build from the Sileo repo (respring happens automatically).
+2. App → Trên xe → switch on "⚠️ Bật thử nghiệm (1 lần)".
+3. Plug into CarPlay. Wait ~6 s. Use ✕ if needed.
+4. App → Trên xe → "Xem log debug", or collect:
+   - `/var/mobile/Library/Logs/splitcarplay_hosting.log`
+   - `/var/mobile/Library/Logs/splitcarplay_carplayenable.log`
+   - Console/`oslog` filtered on `SplitCarPlay` (everything is also NSLog'd)
+   - any `.ips` crash reports for SpringBoard / CarPlayApp
+
+Before plugging in, you can confirm the unknown selectors without a car,
+e.g. with FLEX or Frida attached to SpringBoard:
+`ObjC.classes.SBApplicationSceneHandleRequest.$ownMethods`.
 
 ## Build
 
-Requires [Theos](https://theos.dev/) set up, and a jailbroken iOS
-device/VM to deploy to (rootful or rootless — adjust `control`'s `Depends`
-and the Makefile's `TARGET` if you're on a rootless jailbreak).
+CI (`.github/workflows/build-and-publish.yml`) builds on a macOS runner
+with `THEOS_PACKAGE_SCHEME=rootless` and publishes to GitHub Pages. To
+build locally:
 
 ```bash
-export THEOS=/opt/theos   # wherever Theos lives
-make package              # builds SplitCarPlay + the Prefs bundle, produces a .deb
-make install THEOS_DEVICE_IP=<device ip>   # or copy the .deb and install via Sileo/dpkg
+export THEOS=/opt/theos
+THEOS_PACKAGE_SCHEME=rootless make package
 ```
 
-## Configure
+## Preferences
 
-Settings app → SplitCarPlay (via the PreferenceLoader bundle in `Prefs.bundle/`):
-
-- **Left/Right App** — tap to pick from a list of every installed app
-  (via `LSApplicationWorkspace`, the standard private API for enumerating
-  installed apps) instead of typing a bundle ID by hand. (Native CarPlay
-  apps are the safe starting point; truly arbitrary non-CarPlay apps need
-  something like CarBridge/carplay-cast's scene technique anyway, which is
-  what the ADAPT section already uses.)
-- **Split Ratio** — left-pane width as a fraction of the screen.
-- **Show Divider Handle** — drag it on the CarPlay screen to resize live.
-
-Changing a setting posts the Darwin notification
-`com.example.splitcarplay/reload`, which `Tweak.xm` listens for and
-re-lays-out immediately — no respring needed for ratio/divider changes
-(app swaps re-create the hosted scene, which may flicker).
+Domain `com.example.splitcarplay`, read and written through CFPreferences
+everywhere. Every key and its default lives in one place:
+`SplitCarPlayShared.h` (`SCPDefaultPrefs`). The app posts the Darwin
+notification `com.example.splitcarplay/reload` after each change.
 
 ## Speed card (Vietmap Live)
 
-A floating card (`SpeedBubbleView` in `Tweak.xm`) shows on top of the
-split, mirroring **Vietmap Live's own current speed + speed-limit
-warning** (red ring when over the limit) rather than a raw GPS reading.
+`VietmapLiveHook.xm` runs inside Vietmap Live (`vn.vietmap.live`, a
+Flutter app), hooks `FlutterMethodChannel`'s `setMethodCallHandler:`, and
+publishes the current speed/limit two ways:
 
-This used to be a separate companion tweak (VietmapLiveExport); it's now
-merged directly into this same package as **`VietmapLiveHook.xm`** —
-install just this one tweak. That file injects into the same dylib but
-only *acts* when it's loaded inside Vietmap Live's own process
-(`vn.vietmap.live`): it hooks `FlutterMethodChannel` (Vietmap Live is a
-Flutter app — a real, public, Google-documented class, not a guessed
-private one) and writes what it sees to
-`/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist`,
-which the CarPlay-side code (`SpeedBubbleView`/`SplitCarPlayController`
-in `Tweak.xm`) reads. See `VietmapLiveHook.xm`'s header comment for the
-full mechanism writeup and how to verify/tune its payload-parsing on your
-installed Vietmap Live version (there's a call logger —
-`notifyutil -p com.example.vietmaplivexport/toggle-logging` — writing to
-`/var/mobile/Library/Logs/vietmaplivexport_calls.log`).
+- packed into the 64-bit state of the Darwin notification
+  `com.example.splitcarplay/vietmap-state`, which needs no file access
+  (Vietmap Live is sandboxed);
+- the older shared file
+  `/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist`,
+  which the sandbox may refuse.
 
-Toggle the card from Settings → SplitCarPlay → "Show Speed Bubble". It
-auto-hides if no fresh reading has arrived in the last 6 seconds (Vietmap
-Live not running, or the hook isn't matching the expected channel/method
-names on your installed version).
+The card uses whichever is newer. To check what Vietmap Live actually
+sends: `notifyutil -p com.example.vietmaplivexport/toggle-logging`, then
+read `/var/mobile/Library/Logs/vietmaplivexport_calls.log`.
 
-## Design notes / where to extend
-
-- `layoutContainers` currently **clips** each app's view to its half
-  (`clipsToBounds`). If you'd rather see the whole app UI shrunk to fit
-  (nothing cropped), apply `CGAffineTransformMakeScale` to `appVC.view`
-  instead — that's what the single-app original does for orientation
-  changes, and the comment in that method shows where to swap it in.
-- Touch delivery: once `SBAppViewController.view` is a real subview inside
-  a real, key `UIWindow` on the CarPlay `CADisplay`, ordinary UIKit hit
-  testing should route taps correctly within each half. The
-  `_UISystemGestureManager` dance in the original is for *system-level*
-  gestures (e.g. a dock) layered on top of that, not basic touch delivery —
-  you likely only need it for your own chrome (the divider, a "swap sides"
-  gesture), which is already wired via a plain `UIPanGestureRecognizer`.
-- Swap-sides / long-press-to-pick-app, a live preview thumbnail while
-  dragging, and remembering per-car-head-unit layouts are natural next
-  features once the ADAPT section is solid on your target iOS version.
+The card lives in the CarPlay window, so for now it's only visible while
+the hosting experiment is running.
 
 ## Scope / legal note
 
-This only affects the CarPlay UI process (`com.apple.CarPlayApp`) on a
-device you own and have jailbroken yourself. It doesn't intercept, bridge,
-or exfiltrate anything from other devices or accounts. Jailbreaking and
-redistributing tweaks that reimplement Apple's private frameworks sits in a
-legal gray area in some jurisdictions (DMCA §1201 exemptions for jailbreaking
-exist in the US but vary elsewhere) — that's on you to check for your
-situation if you plan to distribute this beyond personal use.
+Runs on a device you own and jailbroke yourself; injects into SpringBoard,
+CarPlayApp and Vietmap Live. It doesn't bridge to or exfiltrate anything
+from other devices or accounts. Redistributing tweaks built on private
+frameworks is a legal gray area in some places; check yours before
+distributing beyond personal use.

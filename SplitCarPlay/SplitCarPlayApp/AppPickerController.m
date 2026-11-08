@@ -11,6 +11,7 @@
 //  to work around.
 //
 #import <UIKit/UIKit.h>
+#import "../SplitCarPlayShared.h"
 #import <objc/runtime.h>
 
 #pragma mark - Private API (LaunchServices) -- real, widely used by app-picker tweaks
@@ -114,21 +115,15 @@ NSArray<NSString *> *SplitCarPlayUserInstalledBundleIDsSorted(void) {
 
 #pragma mark - Shared prefs path (same contract SplitCarPlay.dylib/Prefs.bundle read/write)
 
-static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
-static NSString * const kReloadNotification = @"com.example.splitcarplay/reload";
-
 void SplitCarPlaySetPref(NSString *key, id value) {
-    NSMutableDictionary *prefs = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: [NSMutableDictionary new];
-    prefs[key] = value;
-    [prefs writeToFile:kPrefsPath atomically:YES];
-    CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                          (__bridge CFStringRef)kReloadNotification, NULL, NULL, YES);
+    SCPSetPref(key, value); // CFPreferences, see ../SplitCarPlayShared.h
+    SCPPostReload();
 }
 
 // "Recent" is a simplification used throughout this project: just the two
 // currently-picked apps (deduplicated), not a persisted history.
 NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    NSDictionary *prefs = SCPCopyPrefs();
     NSMutableArray<NSString *> *recent = [NSMutableArray new];
     for (NSString *bundleID in @[ prefs[@"leftBundleID"] ?: @"", prefs[@"rightBundleID"] ?: @"" ]) {
         if (bundleID.length > 0 && ![recent containsObject:bundleID]) [recent addObject:bundleID];

@@ -269,6 +269,52 @@ use while connected), so as of this version:
       to each other, representing the single physical CarPlay display
       they're splitting. Layout/color only.
 
+## 0.6.0: review fixes (2026-11-08)
+
+Corrections to entries above, after a code review:
+
+- "Hard-disabled" was only half true: `reloadFromPreferences` was gated
+  on `experimentalHostingEnabled`, not disabled, and `CarPlayEnableHook`
+  ran unconditionally (adding a fake CarPlay entry for every third-party
+  app). Both are now behind the experiment switch.
+- "Auto-close Vietmap Live" never fired: its flag was read after the
+  experiment gate. Fixed; also only fires when the CarPlay display is
+  really gone, and Vietmap Live only quits itself while in the background.
+- The pickers in Settings and in the app were separate copies, not one
+  shared picker. Moot now: Prefs.bundle is gone.
+
+Done in this version:
+
+- [x] Hosting runs in SpringBoard only (the SB* classes don't exist in
+      CarPlayApp; both processes used to build a window).
+- [x] Fail-safes: window hidden until an app is attached, 6 s watchdog
+      tear-down, ✕ button + two-finger long press on the car screen,
+      one-shot arming, tear-down on exceptions, first reload deferred
+      3 s after SpringBoard starts.
+- [x] Milestone mode: one app full-width (`experimentalSingleApp`).
+- [x] Hosting fixes: lay out before hosting, resize `appView` (not
+      `appVC.view`), try both known `SBApplicationSceneHandleRequest`
+      constructors, dump real method lists to the log on failure.
+- [x] Flutter hook passes nil handlers through (no hung channels).
+- [x] Prefs: one defaults table + CFPreferences everywhere
+      (`SplitCarPlayShared.h`); fixes the app's 1.1 bubble-scale default
+      and "(chưa chọn)" vs Maps/Music mismatch.
+- [x] Speed state also published via Darwin notify state (no file
+      access needed from sandboxed Vietmap Live).
+- [x] Removed Prefs.bundle, the PreferenceLoader entry and dependency,
+      the Settings injection and the dead "thử chạy app thật" overlay code.
+
+Next:
+
+- [ ] Run one car test; read `splitcarplay_hosting.log` to see which
+      hosting step fails on iOS 15.8.8 and fix that selector.
+- [ ] Possibly launch the app before fetching its scene.
+- [ ] Show the speed card on CarPlay without the hosting experiment
+      (needs its own small window on the CarPlay display).
+- [ ] Replace the `com.example.*` package/prefs identifiers. Changing
+      the package ID makes Sileo treat it as a new package and changing
+      the prefs domain resets settings, so do it deliberately, once.
+
 ## CarPlay app-hosting foundation
 
 - [x] **"Enable any app" layer** (`CarPlayEnableHook.xm`) — without this,

@@ -9,6 +9,7 @@
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "../SplitCarPlayShared.h"
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // AppPickerController.m
 extern void SplitCarPlaySetPref(NSString *key, id value); // AppPickerController.m
@@ -16,7 +17,6 @@ extern void SplitCarPlaySetPref(NSString *key, id value); // AppPickerController
 + (void)presentFrom:(UIViewController *)presenter title:(NSString *)title onPick:(void (^)(NSString *bundleID))onPick;
 @end
 
-static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
 
 typedef NS_ENUM(NSInteger, SplitCarPlayRowKind) {
     SplitCarPlayRowKindSwitch,
@@ -151,7 +151,7 @@ static NSString * const kHostingLogPath = @"/var/mobile/Library/Logs/splitcarpla
 }
 
 - (NSDictionary *)prefs {
-    return [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    return SCPCopyPrefs(); // includes the shared defaults (../SplitCarPlayShared.h)
 }
 
 - (BOOL)boolForKey:(NSString *)key default:(BOOL)defaultValue {

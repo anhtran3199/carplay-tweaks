@@ -2,7 +2,7 @@ ARCHS = arm64 arm64e
 TARGET = iphone:clang:latest:14.0
 
 THEOS_DEVICE_IP =
-INSTALL_TARGET_PROCESSES = CarPlayApp
+INSTALL_TARGET_PROCESSES = SpringBoard CarPlayApp
 
 include $(THEOS)/makefiles/common.mk
 
@@ -20,5 +20,5 @@ SplitCarPlay_FRAMEWORKS = UIKit CoreGraphics QuartzCore AudioToolbox
 
 include $(THEOS_MAKE_PATH)/tweak.mk
 
-SUBPROJECTS += Prefs.bundle SplitCarPlayApp
+SUBPROJECTS += SplitCarPlayApp
 include $(THEOS_MAKE_PATH)/aggregate.mk

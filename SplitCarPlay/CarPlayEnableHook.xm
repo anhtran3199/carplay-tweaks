@@ -40,6 +40,7 @@
 //
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
+#import "SplitCarPlayShared.h"
 
 // Each .xm file in this project compiles as its own translation unit, so
 // this forward declaration (same shape as the one in
@@ -185,8 +186,7 @@ static void SplitCarPlayAddDeclarationsForAllApps(id library) {
     // otherwise just having the tweak installed would add a fake
     // "navigation app" entry for every third-party app on the CarPlay
     // home screen.
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.example.splitcarplay.plist"];
-    if (![prefs[@"experimentalHostingEnabled"] boolValue]) return library;
+    if (![SCPCopyPrefs()[@"experimentalHostingEnabled"] boolValue]) return library;
     if (SplitCarPlay_RunningInCarPlayApp() && library) {
         SplitCarPlayAddDeclarationsForAllApps(library);
     }

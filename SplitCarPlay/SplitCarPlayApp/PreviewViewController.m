@@ -46,6 +46,7 @@
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
 #import <CoreImage/CoreImage.h>
+#import "../SplitCarPlayShared.h"
 
 extern NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID); // AppPickerController.m
 extern UIImage *SplitCarPlayAppIcon(NSString *bundleID); // AppPickerController.m
@@ -151,7 +152,6 @@ typedef NS_ENUM(NSInteger, SplitCarPlayBubbleStyle) {
     SplitCarPlayBubbleStyleBar = 2,
 };
 
-static NSString * const kPrefsPath = @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist";
 static NSString * const kVietmapSharedStatePath = @"/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist";
 
 // "T5, 5/11" -- matches the reference screenshot's date format; mirrors
@@ -621,7 +621,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
     _rightPlaceholder.userInteractionEnabled = YES;
 
     _styleControl = [[UISegmentedControl alloc] initWithItems:@[@"Card", @"Ring", @"Bar"]];
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    NSDictionary *prefs = SCPCopyPrefs();
     _styleControl.selectedSegmentIndex = [prefs[@"bubbleStyle"] integerValue];
     [_styleControl addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
     [self.view addSubview:_styleControl];
@@ -958,7 +958,7 @@ static const CGFloat kSplitCarPlayTitleBarHeight = 26;
 }
 
 - (void)refresh {
-    NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath] ?: @{};
+    NSDictionary *prefs = SCPCopyPrefs();
     NSString *leftID = prefs[@"leftBundleID"];
     NSString *rightID = prefs[@"rightBundleID"];
     _leftIsEmpty = leftID.length == 0;

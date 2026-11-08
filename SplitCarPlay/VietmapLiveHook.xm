@@ -19,6 +19,7 @@
 //
 #import <UIKit/UIKit.h>
 #import <sys/stat.h>
+#import "SplitCarPlayShared.h"
 
 static BOOL SplitCarPlay_RunningInVietmapLive(void) {
     return [[[NSBundle mainBundle] bundleIdentifier] isEqualToString:@"vn.vietmap.live"];
@@ -99,8 +100,13 @@ static void vmWriteSharedState(void) {
         @"isOverLimit": @(overLimit),
         @"timestamp": @([[NSDate date] timeIntervalSince1970]),
     };
+    // May be refused by Vietmap Live's sandbox -- the notify-state publish
+    // below is the path that doesn't need file access (SplitCarPlayShared.h).
     [state writeToFile:kVMSharedStatePath atomically:YES];
     chmod([kVMSharedStatePath fileSystemRepresentation], 0666);
+    SCPPublishSpeedState(SCPEncodeSpeedState(haveSpeed ? gVMLastCurrentSpeed : -1,
+                                             haveLimit ? gVMLastSpeedLimit : -1,
+                                             overLimit, [[NSDate date] timeIntervalSince1970]));
 
     CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                           kVMUpdateNotification, NULL, NULL, YES);
@@ -224,9 +230,9 @@ static void vmHandleFlutterCall(FlutterMethodCall *call) {
                                                             object:nil
                                                              queue:nil
                                                         usingBlock:^(NSNotification *note) {
-            NSDictionary *prefs = [NSDictionary dictionaryWithContentsOfFile:@"/var/mobile/Library/Preferences/com.example.splitcarplay.plist"];
-            NSNumber *keepAlive = prefs[@"keepSourceAppAlive"];
-            if (keepAlive && ![keepAlive boolValue]) return; // explicit off; default is on
+            // If the sandbox blocks reading prefs this falls back to the
+            // default (on).
+            if (![SCPCopyPrefs()[@"keepSourceAppAlive"] boolValue]) return;
 
             UIApplication *app = [UIApplication sharedApplication];
             __block UIBackgroundTaskIdentifier taskID = UIBackgroundTaskInvalid;
