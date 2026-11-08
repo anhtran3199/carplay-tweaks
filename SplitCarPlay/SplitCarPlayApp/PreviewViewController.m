@@ -903,7 +903,6 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 @interface PreviewViewController : UIViewController <UIGestureRecognizerDelegate>
 @end
 
-static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh lần cuối của từng app. Bấm \"Chạy thật\" để mở app thật trong khung (thử nghiệm). Kéo thanh ≡ để đổi tỉ lệ chia; kéo thẻ tốc độ để di chuyển, chụm 2 ngón để đổi cỡ.";
 
 @implementation PreviewViewController {
     UILabel *_headingLabel;
@@ -1006,19 +1005,19 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     NSDictionary *prefs = SCPCopyPrefs();
     _styleControl.selectedSegmentIndex = [prefs[@"bubbleStyle"] integerValue];
     [_styleControl addTarget:self action:@selector(styleChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:_styleControl];
+    // Not shown: style and side are set in "Trên xe". The controls only
+    // hold the current values for this screen's bubble layout.
 
     _positionControl = [[UISegmentedControl alloc] initWithItems:@[@"Trái", @"Phải"]];
     _positionControl.selectedSegmentIndex = [prefs[@"bubblePosition"] integerValue];
     [_positionControl addTarget:self action:@selector(positionChanged:) forControlEvents:UIControlEventValueChanged];
-    [self.view addSubview:_positionControl];
 
     _captionLabel = [[UILabel alloc] init];
     _captionLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
-    _captionLabel.text = kSCPIdleCaption;
+    _captionLabel.text = nil; // only used for errors and warnings
     [self.view addSubview:_captionLabel];
 
     _liveButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -1160,8 +1159,8 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
 
     // Car screen height ~0.95 x width, but never so tall that the
     // controls + caption below get pushed under the (floating) tab bar.
-    CGFloat captionH = MIN(64, ceil([_captionLabel sizeThatFits:CGSizeMake(contentW, CGFLOAT_MAX)].height));
-    CGFloat controlsBlockH = 14 + 36 + 18 + 32 + 10 + 32 + 10 + captionH + 8;
+    CGFloat captionH = _captionLabel.text.length ? MIN(64, ceil([_captionLabel sizeThatFits:CGSizeMake(contentW, CGFLOAT_MAX)].height)) : 0;
+    CGFloat controlsBlockH = 14 + 36 + (captionH > 0 ? 10 + captionH : 0) + 8;
     CGFloat maxCarH = bounds.size.height - self.view.safeAreaInsets.bottom - paneTop - controlsBlockH;
     CGFloat carH = floor(MIN(contentW * 0.95, maxCarH));
     carH = MAX(carH, 200);
@@ -1215,9 +1214,7 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     _liveBothSwitch.frame = CGRectMake(side + contentW - switchSize.width, liveY + floor((36 - switchSize.height) / 2.0), switchSize.width, switchSize.height);
     _liveBothLabel.frame = CGRectMake(CGRectGetMinX(_liveBothSwitch.frame) - 58, liveY, 50, 36);
     _liveButton.frame = CGRectMake(side, liveY, CGRectGetMinX(_liveBothLabel.frame) - side - 10, 36);
-    _styleControl.frame = CGRectMake(side, liveY + 36 + 18, contentW, 32);
-    _positionControl.frame = CGRectMake(side, CGRectGetMaxY(_styleControl.frame) + 10, contentW, 32);
-    _captionLabel.frame = CGRectMake(side, CGRectGetMaxY(_positionControl.frame) + 10, contentW, captionH);
+    _captionLabel.frame = CGRectMake(side, liveY + 36 + 10, contentW, captionH);
 }
 
 - (BOOL)gestureRecognizer:(UIGestureRecognizer *)gestureRecognizer shouldReceiveTouch:(UITouch *)touch {
@@ -1439,6 +1436,7 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     _bubble.showBattery = prefs[@"showBattery"] ? [prefs[@"showBattery"] boolValue] : YES;
     _bubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
     _positionControl.selectedSegmentIndex = prefs[@"bubblePosition"] ? [prefs[@"bubblePosition"] integerValue] : 1;
+    _styleControl.selectedSegmentIndex = [prefs[@"bubbleStyle"] integerValue]; // may have changed in "Trên xe"
     _splitRatio = prefs[@"splitRatio"] ? [prefs[@"splitRatio"] doubleValue] : 0.5;
     _liveBothSwitch.on = [prefs[@"livePreviewBoth"] boolValue]; // SpringBoard may have turned it off
 
@@ -1504,10 +1502,12 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     NSDictionary *prefs = SCPCopyPrefs();
     if (SCPStringPref(prefs, @"leftBundleID").length == 0) {
         _captionLabel.text = @"Chọn app cho ô 1 trước đã.";
+        [self.view setNeedsLayout];
         return;
     }
     if (_liveBothSwitch.on && SCPStringPref(prefs, @"rightBundleID").length == 0) {
         _captionLabel.text = @"Chọn app cho ô 2 trước, hoặc tắt \"2 app\".";
+        [self.view setNeedsLayout];
         return;
     }
     if (_liveBothSwitch.on && [SCPStringPref(prefs, @"leftBundleID") isEqualToString:SCPStringPref(prefs, @"rightBundleID")]) {
@@ -1557,16 +1557,16 @@ static NSString * const kSCPIdleCaption = @"Khung trên là ảnh chụp tĩnh l
     if (wasLive && !live) [self restoreBubbleFromLive];
     switch (state) {
         case SCPLiveStateStarting:
-            _captionLabel.text = @"Đang mở app thật… (tự huỷ sau 12 giây nếu không được)";
+            _captionLabel.text = nil; // the button says "Đang mở…"
             break;
         case SCPLiveStateRunning:
-            _captionLabel.text = @"App đang chạy thật trong khung, bấm vào được. Kéo thanh ≡ để đổi cỡ 2 khung. Bấm ✕ đỏ hoặc \"Dừng\" để thoát.";
+            _captionLabel.text = nil;
             break;
         case SCPLiveStateFailed:
             _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Gửi file /var/mobile/Library/Logs/splitcarplay_hosting.log để sửa.";
             break;
         default:
-            _captionLabel.text = kSCPIdleCaption;
+            _captionLabel.text = nil;
             break;
     }
     [self.view setNeedsLayout];
