@@ -45,12 +45,13 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
     [super viewDidLoad];
     UITabBar *bar = self.tabBar;
     bar.tintColor = [UIColor systemBlueColor];
-    bar.unselectedItemTintColor = [UIColor colorWithWhite:0.55 alpha:1];
-    bar.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.97];
+    bar.unselectedItemTintColor = [UIColor secondaryLabelColor];
+    // System colours so the bar follows light/dark mode.
+    bar.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
     bar.layer.cornerRadius = kSCPTabBarCornerRadius;
     bar.layer.masksToBounds = NO;
     bar.layer.borderWidth = 1.0 / MAX(1.0, [UIScreen mainScreen].scale);
-    bar.layer.borderColor = [UIColor colorWithWhite:0.88 alpha:1].CGColor;
+    bar.layer.borderColor = [UIColor separatorColor].CGColor;
     bar.layer.shadowColor = [UIColor blackColor].CGColor;
     bar.layer.shadowOpacity = 0.10;
     bar.layer.shadowRadius = 12;
@@ -61,7 +62,7 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
 
 - (void)applyAppearanceWithIndicator:(UIImage *)indicator {
     UIColor *selectedColor = [UIColor systemBlueColor];
-    UIColor *normalColor = [UIColor colorWithWhite:0.55 alpha:1];
+    UIColor *normalColor = [UIColor secondaryLabelColor];
     if (@available(iOS 13.0, *)) {
         // Transparent bar background: the bar's own (rounded) layer
         // background shows through instead of UIKit's square one.
@@ -107,7 +108,7 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:size];
     return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
         CGRect pill = CGRectInset(CGRectMake(0, 0, size.width, size.height), 8, 4);
-        [[UIColor colorWithRed:0.88 green:0.93 blue:1.0 alpha:1] setFill];
+        [[[UIColor systemBlueColor] colorWithAlphaComponent:0.15] setFill]; // reads on light and dark
         [[UIBezierPath bezierPathWithRoundedRect:pill cornerRadius:14] fill];
     }];
 }
@@ -148,6 +149,15 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
     }
 }
 
+// CGColor borders don't follow light/dark by themselves.
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    if ([self.traitCollection hasDifferentColorAppearanceComparedToTraitCollection:previous]) {
+        self.tabBar.layer.borderColor = [UIColor separatorColor].CGColor;
+        if (_indicatorSize.width > 0) [self applyAppearanceWithIndicator:[self indicatorImageOfSize:_indicatorSize]];
+    }
+}
+
 @end
 
 @implementation AppDelegate
@@ -173,10 +183,9 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
         [self tabWithRoot:[[PreviewViewController alloc] init] title:@"Mô phỏng" systemImage:@"play.rectangle.fill"],
         [self tabWithRoot:[[AccountViewController alloc] init] title:@"Tài khoản" systemImage:@"person.crop.circle"],
     ];
-    // "Mô phỏng" is the tab SidePlay's own screenshots default-open to in
-    // this project's reference images, and the most useful one to land
-    // on first (actually shows something interactive right away).
-    tabBar.selectedIndex = 2;
+    // Open on Trang chủ (like SidePlay2). Mô phỏng starts the real apps as
+    // soon as it shows, which shouldn't happen just by opening the app.
+    tabBar.selectedIndex = 0;
 
     self.window.rootViewController = tabBar;
     [self.window makeKeyAndVisible];

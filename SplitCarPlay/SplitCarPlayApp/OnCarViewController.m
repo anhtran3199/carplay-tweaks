@@ -46,6 +46,8 @@ typedef NS_ENUM(NSInteger, SCPRowKind) {
 @property (nonatomic, copy) UIViewController * (^pageBuilder)(void);
 @property (nonatomic, copy) void (^action)(UIViewController *from);
 @property (nonatomic, copy) void (^afterChange)(id value); // e.g. keep two prefs in sync
+@property (nonatomic, copy) BOOL (^isOn)(NSDictionary *prefs);   // switch state when it isn't just prefs[key]
+@property (nonatomic, copy) NSString * (^valueText)(float value); // slider: shown next to it
 @end
 
 @implementation SCPRow
@@ -87,7 +89,41 @@ static SCPRow *SCPWithIcon(SCPRow *row, NSString *symbol, UIColor *color) {
     return row;
 }
 
+static UIImage *SCPRowIconUncached(NSString *symbol, UIColor *color);
+
 static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    NSString *key = [NSString stringWithFormat:@"%@|%@", symbol, color];
+    UIImage *image = [cache objectForKey:key];
+    if (!image) {
+        image = SCPRowIconUncached(symbol, color);
+        if (image) [cache setObject:image forKey:key];
+    }
+    return image;
+}
+
+// App icon with rounded corners, 29pt, cached.
+static UIImage *SCPRoundedAppIcon(NSString *bundleID) {
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    if (bundleID.length == 0) return nil;
+    UIImage *image = [cache objectForKey:bundleID];
+    if (image) return image;
+    UIImage *icon = SplitCarPlayAppIcon(bundleID);
+    if (!icon) return nil;
+    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
+    image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 29, 29) cornerRadius:7] addClip];
+        [icon drawInRect:CGRectMake(0, 0, 29, 29)];
+    }];
+    [cache setObject:image forKey:bundleID];
+    return image;
+}
+
+static UIImage *SCPRowIconUncached(NSString *symbol, UIColor *color) {
     CGFloat size = 29;
     UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(size, size)];
     return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
@@ -111,15 +147,22 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
 @property (nonatomic, copy) NSArray<NSArray<SCPRow *> *> *sections;
 @end
 
-@implementation SCPSettingsListController
+@implementation SCPSettingsListController {
+    NSDictionary *_prefs; // read once per reload, not once per cell
+}
 
 - (instancetype)init {
     return [super initWithStyle:UITableViewStyleInsetGrouped];
 }
 
+- (void)reloadAll {
+    _prefs = SCPCopyPrefs();
+    [self.tableView reloadData];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    [self.tableView reloadData]; // SpringBoard changes some prefs by itself
+    [self reloadAll]; // SpringBoard changes some prefs by itself
 }
 
 - (NSInteger)numberOfSectionsInTableView:(UITableView *)tableView {
@@ -142,16 +185,21 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     SCPRow *row = self.sections[indexPath.section][indexPath.row];
-    NSDictionary *prefs = SCPCopyPrefs();
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:nil];
+    if (!_prefs) _prefs = SCPCopyPrefs();
+    NSDictionary *prefs = _prefs;
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"SCPRow"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleValue1 reuseIdentifier:@"SCPRow"];
     cell.textLabel.text = row.label;
+    cell.detailTextLabel.text = nil;
+    cell.imageView.image = row.symbol ? SCPRowIcon(row.symbol, row.symbolColor ?: [UIColor systemBlueColor]) : nil;
+    cell.accessoryView = nil;
+    cell.accessoryType = UITableViewCellAccessoryNone;
     cell.selectionStyle = UITableViewCellSelectionStyleNone;
-    if (row.symbol) cell.imageView.image = SCPRowIcon(row.symbol, row.symbolColor ?: [UIColor systemBlueColor]);
 
     switch (row.kind) {
         case SCPRowKindSwitch: {
             UISwitch *toggle = [[UISwitch alloc] init];
-            toggle.on = prefs[row.key] ? [prefs[row.key] boolValue] : row.defaultOn;
+            toggle.on = row.isOn ? row.isOn(prefs) : (prefs[row.key] ? [prefs[row.key] boolValue] : row.defaultOn);
             [toggle addTarget:self action:@selector(switchChanged:) forControlEvents:UIControlEventValueChanged];
             objc_setAssociatedObject(toggle, "row", row, OBJC_ASSOCIATION_RETAIN);
             cell.accessoryView = toggle;
@@ -164,6 +212,8 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
             slider.value = prefs[row.key] ? [prefs[row.key] floatValue] : (row.sliderMin + row.sliderMax) / 2.0;
             [slider addTarget:self action:@selector(sliderChanged:) forControlEvents:UIControlEventValueChanged];
             objc_setAssociatedObject(slider, "row", row, OBJC_ASSOCIATION_RETAIN);
+            objc_setAssociatedObject(slider, "label", cell.detailTextLabel, OBJC_ASSOCIATION_ASSIGN);
+            cell.detailTextLabel.text = row.valueText ? row.valueText(slider.value) : nil;
             cell.accessoryView = slider;
             break;
         }
@@ -174,16 +224,7 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
             cell.detailTextLabel.text = [self detailForRow:row prefs:prefs];
             cell.accessoryType = row.kind == SCPRowKindAction ? UITableViewCellAccessoryNone : UITableViewCellAccessoryDisclosureIndicator;
             cell.selectionStyle = UITableViewCellSelectionStyleDefault;
-            if (row.kind == SCPRowKindApp) {
-                UIImage *icon = SplitCarPlayAppIcon(prefs[row.key]);
-                if (icon) {
-                    UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
-                    cell.imageView.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-                        [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 29, 29) cornerRadius:7] addClip];
-                        [icon drawInRect:CGRectMake(0, 0, 29, 29)];
-                    }];
-                }
-            }
+            if (row.kind == SCPRowKindApp) cell.imageView.image = SCPRoundedAppIcon(prefs[row.key]);
             break;
     }
     return cell;
@@ -218,7 +259,7 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
             [AppPickerController presentFrom:self title:row.label onPick:^(NSString *bundleID) {
                 SplitCarPlaySetPref(row.key, bundleID);
                 if (row.afterChange) row.afterChange(bundleID);
-                [weakSelf.tableView reloadData];
+                [weakSelf reloadAll];
             }];
             break;
         }
@@ -229,7 +270,7 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
                     id value = row.optionValues ? row.optionValues[index] : @(index);
                     SplitCarPlaySetPref(row.key, value);
                     if (row.afterChange) row.afterChange(value);
-                    [weakSelf.tableView reloadData];
+                    [weakSelf reloadAll];
                 }]];
             }];
             [sheet addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
@@ -247,11 +288,15 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
     SCPRow *row = objc_getAssociatedObject(sender, "row");
     SplitCarPlaySetPref(row.key, @(sender.isOn));
     if (row.afterChange) row.afterChange(@(sender.isOn));
+    _prefs = SCPCopyPrefs();
 }
 
 - (void)sliderChanged:(UISlider *)sender {
     SCPRow *row = objc_getAssociatedObject(sender, "row");
+    UILabel *label = objc_getAssociatedObject(sender, "label");
+    if (row.valueText) label.text = row.valueText(sender.value);
     SplitCarPlaySetPref(row.key, @(sender.value));
+    _prefs = nil; // re-read on the next cell
 }
 
 @end
@@ -272,7 +317,7 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
 
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.title = @"Ứng dụng";
+    self.title = @"App trên thanh tab";
     _installed = SplitCarPlayUserInstalledBundleIDsSorted();
     NSArray *stored = SCPCopyPrefs()[@"carApps"];
     _chosen = [stored isKindOfClass:[NSArray class]] ? [stored mutableCopy] : [NSMutableArray new];
@@ -281,7 +326,7 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
 
 - (void)updateTitle {
     self.navigationItem.prompt = nil;
-    self.title = [NSString stringWithFormat:@"Ứng dụng (%lu/%lu)", (unsigned long)_chosen.count, (unsigned long)kSCPMaxCarApps];
+    self.title = [NSString stringWithFormat:@"App trên thanh tab (%lu/%lu)", (unsigned long)_chosen.count, (unsigned long)kSCPMaxCarApps];
 }
 
 - (NSInteger)tableView:(UITableView *)tableView numberOfRowsInSection:(NSInteger)section {
@@ -294,16 +339,10 @@ static UIImage *SCPRowIcon(NSString *symbol, UIColor *color) {
 
 - (UITableViewCell *)tableView:(UITableView *)tableView cellForRowAtIndexPath:(NSIndexPath *)indexPath {
     NSString *bundleID = _installed[indexPath.row];
-    UITableViewCell *cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:nil];
+    UITableViewCell *cell = [tableView dequeueReusableCellWithIdentifier:@"App"];
+    if (!cell) cell = [[UITableViewCell alloc] initWithStyle:UITableViewCellStyleDefault reuseIdentifier:@"App"];
     cell.textLabel.text = SplitCarPlayDisplayNameForBundleID(bundleID);
-    UIImage *icon = SplitCarPlayAppIcon(bundleID);
-    if (icon) {
-        UIGraphicsImageRenderer *renderer = [[UIGraphicsImageRenderer alloc] initWithSize:CGSizeMake(29, 29)];
-        cell.imageView.image = [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-            [[UIBezierPath bezierPathWithRoundedRect:CGRectMake(0, 0, 29, 29) cornerRadius:7] addClip];
-            [icon drawInRect:CGRectMake(0, 0, 29, 29)];
-        }];
-    }
+    cell.imageView.image = SCPRoundedAppIcon(bundleID);
     cell.accessoryType = [_chosen containsObject:bundleID] ? UITableViewCellAccessoryCheckmark : UITableViewCellAccessoryNone;
     return cell;
 }
@@ -431,6 +470,7 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
     UIColor *indigo = [UIColor systemIndigoColor];
 
     SCPRow *openOnConnect = SCPWithIcon(SCPSwitch(@"Mở khi kết nối CarPlay", @"carPlayAutoHost", NO), @"car.fill", blue);
+    openOnConnect.isOn = ^BOOL(NSDictionary *prefs) { return SCPIsCarPlayOn(prefs); }; // same as Trang chủ
     openOnConnect.afterChange = ^(id value) {
         // Same switch as "Đang bật" on Trang chủ.
         if ([value boolValue]) {
@@ -441,7 +481,7 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
 
     self.sectionTitles = @[@"CarPlay", @"Tuỳ chỉnh", @"Nâng cao"];
     self.sectionFooters = @[
-        @"\"Mở khi kết nối CarPlay\" là cùng công tắc với \"Đang bật\" ở Trang chủ. \"Tự làm tối màn hình\": 10 giây sau khi app hiện trên xe, màn hình điện thoại tối đi; tắt app trên xe thì sáng lại.",
+        @"\"Tự làm tối màn hình\": 10 giây sau khi app hiện trên xe, màn hình điện thoại tối đi; tắt app trên xe thì sáng lại.",
         @"",
         @"\"Thử 1 lần\" tự TẮT khi bắt đầu một lần thử. Trên màn hình xe: bấm ✕ trên thanh tab hoặc giữ 2 ngón tay 1 giây để quay về CarPlay bình thường.",
     ];
@@ -452,7 +492,7 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
         @[ SCPWithIcon(SCPPage(@"Bong bóng tốc độ", ^UIViewController *{ return [OnCarViewController bubblePage]; }),
                        @"speedometer", [UIColor systemOrangeColor]),
            [self appBarRow],
-           SCPWithIcon(SCPPage(@"Mở nhanh", ^UIViewController *{ return [OnCarViewController quickOpenPage]; }),
+           SCPWithIcon(SCPPage(@"App khi cắm xe", ^UIViewController *{ return [OnCarViewController quickOpenPage]; }),
                        @"sparkles", blue),
            SCPWithIcon(SCPPage(@"Màn hình trên xe", ^UIViewController *{ return [OnCarViewController carScreenPage]; }),
                        @"rectangle.split.2x1", blue),
@@ -470,7 +510,7 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
 }
 
 - (SCPRow *)appsRow {
-    SCPRow *row = SCPPage(@"Ứng dụng", ^UIViewController *{ return [SCPCarAppsController new]; });
+    SCPRow *row = SCPPage(@"App trên thanh tab", ^UIViewController *{ return [SCPCarAppsController new]; });
     row.detail = ^NSString *(NSDictionary *prefs) {
         NSArray *apps = [prefs[@"carApps"] isKindOfClass:[NSArray class]] ? prefs[@"carApps"] : @[];
         return [NSString stringWithFormat:@"%lu/%lu", (unsigned long)apps.count, (unsigned long)kSCPMaxCarApps];
@@ -483,6 +523,11 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
     return SCPWithIcon(row, @"doc.text.magnifyingglass", [UIColor systemGrayColor]);
 }
 
++ (SCPRow *)slider:(SCPRow *)row format:(NSString * (^)(float value))format {
+    row.valueText = format;
+    return row;
+}
+
 + (UIViewController *)bubblePage {
     SCPSettingsListController *page = [SCPSettingsListController new];
     page.title = @"Bong bóng tốc độ";
@@ -490,9 +535,10 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
     page.sectionFooters = @[@"", @"", @"Tốc độ lấy từ Vietmap Live đang chạy trên điện thoại."];
     page.sections = @[
         @[ SCPSwitch(@"Hiện bong bóng", @"showSpeedBubble", YES),
-           SCPChoice(@"Kiểu", @"bubbleStyle", @[@"Card", @"Ring", @"Bar"]),
+           SCPChoice(@"Kiểu", @"bubbleStyle", @[@"Thẻ", @"Vòng", @"Thanh"]),
            SCPChoice(@"Vị trí", @"bubblePosition", @[@"Trái", @"Phải"]),
-           SCPSlider(@"Kích thước", @"bubbleScale", 0.6, 1.6) ],
+           [OnCarViewController slider:SCPSlider(@"Kích thước", @"bubbleScale", 0.6, 1.6)
+                                format:^NSString *(float v) { return [NSString stringWithFormat:@"%.1f×", v]; }] ],
         @[ SCPSwitch(@"Cảnh báo vượt tốc độ", @"speedAudioAlert", YES),
            SCPSwitch(@"Hiện ngày", @"showDate", YES),
            SCPSwitch(@"Hiện pin", @"showBattery", YES),
@@ -505,13 +551,13 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
 
 + (UIViewController *)quickOpenPage {
     SCPSettingsListController *page = [SCPSettingsListController new];
-    page.title = @"Mở nhanh";
+    page.title = @"App khi cắm xe";
     page.sectionTitles = @[@"Mở khi cắm xe"];
     page.sectionFooters = @[@"Bố cục mở ra khi cắm CarPlay. Nếu bật \"Mở lại bố cục lần cuối\", lần sau sẽ mở lại đúng app và tỉ lệ đã dùng lần trước trên xe thay cho bố cục này."];
     page.sections = @[
         @[ SCPApp(@"Ô 1", @"leftBundleID"),
            SCPApp(@"Ô 2", @"rightBundleID"),
-           SCPSwitch(@"Chỉ 1 app toàn màn hình (ô 1)", @"experimentalSingleApp", YES) ],
+           SCPSwitch(@"Chỉ 1 app toàn màn hình (ô 1)", @"experimentalSingleApp", NO) ],
     ];
     return page;
 }
@@ -522,7 +568,8 @@ static NSString *SCPAppBarDetail(NSDictionary *prefs) {
     page.sectionTitles = @[@"Bố cục"];
     page.sectionFooters = @[@"Trên xe có thể kéo thanh chia để đổi tỉ lệ; tỉ lệ mới được nhớ lại."];
     page.sections = @[
-        @[ SCPSlider(@"Tỉ lệ chia (ô 1)", @"splitRatio", 0.2, 0.8),
+        @[ [OnCarViewController slider:SCPSlider(@"Tỉ lệ chia (ô 1)", @"splitRatio", 0.2, 0.8)
+                                format:^NSString *(float v) { return [NSString stringWithFormat:@"%.0f%%", v * 100]; }],
            SCPSwitch(@"Hiện thanh chia", @"showDivider", YES) ],
     ];
     return page;

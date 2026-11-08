@@ -37,26 +37,52 @@
 
 #pragma mark - Logging
 
+void SCPHostAppendLog(NSString *line) {
+    static dispatch_queue_t queue;
+    static NSFileHandle *handle;
+    static NSDateFormatter *formatter;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        queue = dispatch_queue_create("com.example.splitcarplay.log", DISPATCH_QUEUE_SERIAL);
+        formatter = [NSDateFormatter new];
+        formatter.dateFormat = @"HH:mm:ss";
+    });
+    NSDate *now = [NSDate date];
+    dispatch_async(queue, ^{
+        NSString *path = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
+        if (!handle) {
+            if (![[NSFileManager defaultManager] fileExistsAtPath:path]) {
+                [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
+            }
+            handle = [NSFileHandle fileHandleForWritingAtPath:path];
+        }
+        @try {
+            unsigned long long size = [handle seekToEndOfFile];
+            if (size > 512 * 1024) {
+                // Keep the newest half.
+                [handle closeFile];
+                NSData *data = [NSData dataWithContentsOfFile:path];
+                NSData *tail = data.length > 256 * 1024 ? [data subdataWithRange:NSMakeRange(data.length - 256 * 1024, 256 * 1024)] : data;
+                [tail writeToFile:path atomically:YES];
+                handle = [NSFileHandle fileHandleForWritingAtPath:path];
+                [handle seekToEndOfFile];
+            }
+            NSString *stamped = [NSString stringWithFormat:@"[%@] %@
+", [formatter stringFromDate:now], line];
+            [handle writeData:[stamped dataUsingEncoding:NSUTF8StringEncoding]];
+        } @catch (NSException *exception) {
+            handle = nil; // reopen next time (file deleted from the app, etc.)
+        }
+    });
+}
+
 static void SCPLiveLog(NSString *format, ...) {
     va_list args;
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
     NSLog(@"[SplitCarPlay/live] %@", message);
-
-    NSString *path = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
-    NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                           dateStyle:NSDateFormatterNoStyle
-                                                           timeStyle:NSDateFormatterMediumStyle];
-    NSString *line = [NSString stringWithFormat:@"[%@] [live] %@\n", timestamp, message];
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!handle) {
-        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-        handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    }
-    [handle seekToEndOfFile];
-    [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-    [handle closeFile];
+    SCPHostAppendLog([@"[live] " stringByAppendingString:message]);
 }
 
 // Class (+) and instance (-) method names, for the log when a guessed
@@ -166,6 +192,50 @@ static void SCPLiveKeepForever(id object) {
     if (object && ![SCPLiveKeptObjects() containsObject:object]) [SCPLiveKeptObjects() addObject:object];
 }
 
+NSUInteger SCPHostKeptObjectCount(void) {
+    return SCPLiveKeptObjects().count;
+}
+
+// Every drop of a dead app leaves one more view controller alive for good.
+// After 3 for the same app, stop making new ones for it until SpringBoard
+// restarts, so memory can't keep growing on a phone that keeps killing it.
+static NSMutableDictionary<NSString *, NSNumber *> *SCPLiveDropCounts(void) {
+    static NSMutableDictionary *counts;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ counts = [NSMutableDictionary new]; });
+    return counts;
+}
+
+static void SCPLiveNoteDrop(NSString *bundleID) {
+    if (bundleID.length == 0) return;
+    SCPLiveDropCounts()[bundleID] = @([SCPLiveDropCounts()[bundleID] integerValue] + 1);
+}
+
+static BOOL SCPLiveDroppedTooOften(NSString *bundleID) {
+    return bundleID.length > 0 && [SCPLiveDropCounts()[bundleID] integerValue] >= 3;
+}
+
+// Removes our own views (bubble, buttons, labels, empty containers) from a
+// window we stop using, leaving only the containers that hold an app's view
+// (those views must stay attached to something; their controllers are kept).
+void SCPHostStripOwnViews(UIView *root) {
+    NSMutableSet<UIView *> *appViews = [NSMutableSet new];
+    for (id object in SCPLiveKeptObjects()) {
+        if ([object isKindOfClass:[UIViewController class]] && [object isViewLoaded]) [appViews addObject:[object view]];
+    }
+    for (UIView *child in [root.subviews copy]) {
+        BOOL holdsApp = [appViews containsObject:child];
+        for (UIView *grandchild in child.subviews) holdsApp = holdsApp || [appViews containsObject:grandchild];
+        if (!holdsApp) {
+            [child removeFromSuperview];
+            continue;
+        }
+        for (UIView *grandchild in [child.subviews copy]) {
+            if (![appViews containsObject:grandchild]) [grandchild removeFromSuperview];
+        }
+    }
+}
+
 #pragma mark - Window that only takes touches on its panes
 
 @interface SCPLivePassthroughWindow : UIWindow
@@ -262,6 +332,7 @@ static void SCPLiveKeepForever(id object) {
         NSString *rightID = prefs[@"rightBundleID"];
         CGRect leftFrame = CGRectFromString(prefs[@"livePreviewLeftFrame"] ?: @"");
         CGRect rightFrame = CGRectFromString(prefs[@"livePreviewRightFrame"] ?: @"");
+        SCPLiveLog(@"[mem] live-start %@ kept=%lu", SCPMemLine(), (unsigned long)SCPLiveKeptObjects().count);
         SCPLiveLog(@"start: left=%@ %@ right=%@ %@ both=%d", leftID, NSStringFromCGRect(leftFrame),
                     rightID, NSStringFromCGRect(rightFrame), both);
 
@@ -518,7 +589,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         _bubble = bubble;
         [self refreshBubble];
         __weak __typeof__(self) weakSelf = self;
-        _bubbleTimer = [NSTimer scheduledTimerWithTimeInterval:1.0 repeats:YES block:^(NSTimer *timer) {
+        _bubbleTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
             __strong __typeof__(weakSelf) strongSelf = weakSelf;
             if (!strongSelf) { [timer invalidate]; return; }
             [strongSelf refreshBubble];
@@ -576,7 +647,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 }
 
 - (void)refreshBubble {
-    if (!_bubble) return;
+    if (!_bubble || _bubble.hidden) return;
     // Newer of the shared file and the notify state, as in Tweak.xm.
     NSDictionary *state = [NSDictionary dictionaryWithContentsOfFile:kSCPLiveVietmapStatePath];
     NSDictionary *notifyState = SCPReadSpeedState();
@@ -679,6 +750,12 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         if (appVC) {
             SCPLiveLog(@"  attach %@: reusing %@", bundleID, appVC);
         } else {
+            if (SCPLiveDroppedTooOften(bundleID)) {
+                SCPLiveLog(@"  attach %@: refused, dropped 3 times since SpringBoard started", bundleID);
+                slot.finished = YES;
+                [self showMessage:@"App này bị iOS đóng nhiều lần. Respring để thử lại." inSlot:slot];
+                return;
+            }
             appVC = [self makeAppViewControllerForSlot:slot application:application];
             if (!appVC) {
                 slot.finished = YES;
@@ -811,6 +888,8 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 // Lets go of a slot whose app is gone, without touching its scene again.
 - (void)dropSlot:(SCPLiveSlot *)slot message:(NSString *)message reason:(NSString *)reason {
     SCPLiveLog(@"  drop %@: %@", slot.bundleID, reason);
+    SCPLiveLog(@"[mem] live-drop %@ kept=%lu", SCPMemLine(), (unsigned long)SCPLiveKeptObjects().count);
+    SCPLiveNoteDrop(slot.bundleID);
     slot.hosted = NO;
     slot.finished = YES;
     [slot.appViewController view].hidden = YES;
@@ -937,8 +1016,10 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 - (void)releaseSlots:(NSArray<SCPLiveSlot *> *)slots index:(NSUInteger)index window:(UIWindow *)window state:(uint64_t)state {
     if (index >= slots.count) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            // Nothing is freed: the view controllers stay (reused next
-            // time) and so does the hidden window holding their views.
+            // Nothing that SpringBoard may use is freed: the view
+            // controllers stay (reused next time) and so does the hidden
+            // window holding their views. Our own views are removed.
+            SCPHostStripOwnViews(window.rootViewController.view);
             SCPLiveKeepForever(window);
             for (SCPLiveSlot *slot in slots) {
                 slot.appViewController = nil; // still held by SCPLiveKeptObjects
@@ -947,6 +1028,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
             }
             self->_tearingDown = NO;
             SCPLiveLog(@"stop: done (kept %lu objects for reuse)", (unsigned long)SCPLiveKeptObjects().count);
+            SCPLiveLog(@"[mem] live-stop %@", SCPMemLine());
             // Clear the crash marker a bit later, so a crash right after
             // closing (as in 0.7.4) is still noticed on the next start.
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
@@ -1027,6 +1109,10 @@ UIViewController *SCPHostAppViewController(NSString *bundleID, id application) {
     if (bundleID.length == 0 || !application) return nil;
     UIViewController *controller = SCPLiveReusableControllers()[bundleID];
     if (controller) return controller;
+    if (SCPLiveDroppedTooOften(bundleID)) {
+        SCPLiveLog(@"host core: %@ refused, dropped 3 times since SpringBoard started", bundleID);
+        return nil;
+    }
     @try {
         SCPLiveSlot *slot = [SCPLiveSlot new];
         slot.bundleID = bundleID;
@@ -1043,6 +1129,7 @@ UIViewController *SCPHostAppViewController(NSString *bundleID, id application) {
 }
 
 void SCPHostForgetAppViewController(NSString *bundleID, UIViewController *controller) {
+    SCPLiveNoteDrop(bundleID);
     if (bundleID.length && SCPLiveReusableControllers()[bundleID] == controller) {
         [SCPLiveReusableControllers() removeObjectForKey:bundleID];
     }

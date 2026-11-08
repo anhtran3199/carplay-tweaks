@@ -122,7 +122,7 @@ static NSComparisonResult SCPCompareVersions(NSString *a, NSString *b) {
     UIView *header = [[UIView alloc] initWithFrame:CGRectMake(0, 0, self.view.bounds.size.width, 150)];
     UIImageView *logo = [[UIImageView alloc] initWithImage:[UIImage imageNamed:@"AppIcon60x60"]];
     logo.frame = CGRectMake(0, 14, 72, 72);
-    logo.layer.cornerRadius = 16;
+    logo.layer.cornerRadius = 16; // large-card radius
     logo.layer.cornerCurve = kCACornerCurveContinuous;
     logo.clipsToBounds = YES;
     logo.autoresizingMask = UIViewAutoresizingFlexibleLeftMargin | UIViewAutoresizingFlexibleRightMargin;
@@ -137,7 +137,7 @@ static NSComparisonResult SCPCompareVersions(NSString *a, NSString *b) {
     [header addSubview:name];
 
     UILabel *plan = [[UILabel alloc] initWithFrame:CGRectMake(0, 120, header.bounds.size.width, 20)];
-    plan.text = [NSString stringWithFormat:@"Bản cá nhân · không cần đăng nhập · %@", [self appVersion]];
+    plan.text = [NSString stringWithFormat:@"Bản cá nhân · v%@", [self appVersion]];
     plan.font = [UIFont systemFontOfSize:13];
     plan.textColor = [UIColor secondaryLabelColor];
     plan.textAlignment = NSTextAlignmentCenter;
@@ -174,7 +174,7 @@ static NSComparisonResult SCPCompareVersions(NSString *a, NSString *b) {
            SCPAction(@"Báo lỗi trên GitHub", @"ladybug.fill", [UIColor systemOrangeColor], SCPAccountActionReport),
            SCPAction(@"Gửi email", @"envelope.fill", [UIColor systemBlueColor], SCPAccountActionEmail) ],
         @[ reset ],
-        @[ SCPAction(@"Mã nguồn", @"chevron.left.forwardslash.chevron.right", [UIColor darkGrayColor], SCPAccountActionSource) ],
+        @[ SCPAction(@"Mã nguồn", @"chevron.left.forwardslash.chevron.right", [UIColor systemGrayColor], SCPAccountActionSource) ],
     ];
     [self.tableView reloadData];
 }

@@ -84,15 +84,37 @@ static BOOL vmExtractNumber(id args, NSArray<NSString *> *candidateKeys, double 
 }
 
 static void vmWriteSharedState(void) {
-    NSFileManager *fm = [NSFileManager defaultManager];
-    if (![fm fileExistsAtPath:kVMSharedStateDir]) {
-        [fm createDirectoryAtPath:kVMSharedStateDir withIntermediateDirectories:YES
-                        attributes:@{NSFilePosixPermissions: @0777} error:nil];
-    }
-
     BOOL haveLimit = gVMLastSpeedLimit > 0;
     BOOL haveSpeed = gVMLastCurrentSpeed >= 0;
     BOOL overLimit = haveLimit && haveSpeed && (gVMLastCurrentSpeed > gVMLastSpeedLimit);
+
+    // Runs on Flutter's platform (main) thread for every channel call.
+    // Unchanged values are republished at most every 2 s (to stay "fresh"
+    // for the bubble, which treats >6 s as disconnected); the file at most
+    // every 2 s too, since the notify state is the main path.
+    static double lastSpeed = -2, lastLimit = -2;
+    static BOOL lastOver = NO;
+    static CFAbsoluteTime lastPublish = 0, lastFileWrite = 0;
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    BOOL changed = llround(gVMLastCurrentSpeed) != llround(lastSpeed) || llround(gVMLastSpeedLimit) != llround(lastLimit) || overLimit != lastOver;
+    if (!changed && now - lastPublish < 2.0) return;
+    lastSpeed = gVMLastCurrentSpeed;
+    lastLimit = gVMLastSpeedLimit;
+    lastOver = overLimit;
+    lastPublish = now;
+    BOOL writeFile = now - lastFileWrite >= 2.0;
+    if (writeFile) lastFileWrite = now;
+
+    static dispatch_once_t dirOnce;
+    if (writeFile) {
+        dispatch_once(&dirOnce, ^{
+            NSFileManager *fm = [NSFileManager defaultManager];
+            if (![fm fileExistsAtPath:kVMSharedStateDir]) {
+                [fm createDirectoryAtPath:kVMSharedStateDir withIntermediateDirectories:YES
+                                attributes:@{NSFilePosixPermissions: @0777} error:nil];
+            }
+        });
+    }
 
     NSDictionary *state = @{
         @"speedLimitText": haveLimit ? [NSString stringWithFormat:@"%.0f", gVMLastSpeedLimit] : @"",
@@ -102,8 +124,10 @@ static void vmWriteSharedState(void) {
     };
     // May be refused by Vietmap Live's sandbox -- the notify-state publish
     // below is the path that doesn't need file access (SplitCarPlayShared.h).
-    [state writeToFile:kVMSharedStatePath atomically:YES];
-    chmod([kVMSharedStatePath fileSystemRepresentation], 0666);
+    if (writeFile) {
+        [state writeToFile:kVMSharedStatePath atomically:YES];
+        chmod([kVMSharedStatePath fileSystemRepresentation], 0666);
+    }
     SCPPublishSpeedState(SCPEncodeSpeedState(haveSpeed ? gVMLastCurrentSpeed : -1,
                                              haveLimit ? gVMLastSpeedLimit : -1,
                                              overLimit, [[NSDate date] timeIntervalSince1970]));

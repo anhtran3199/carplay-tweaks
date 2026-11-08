@@ -60,20 +60,47 @@ static BOOL SplitCarPlayAppLooksUserInstalled(LSApplicationProxy *app) {
     return [type isEqualToString:@"User"];
 }
 
-NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID) {
-    if (bundleID.length == 0) return nil;
+// bundle ID -> display name for every installed app, built in one pass and
+// kept for 60 s (it used to walk every installed app on each lookup, i.e.
+// once per table cell).
+static NSDictionary<NSString *, NSString *> *SplitCarPlayAllDisplayNames(void) {
+    static NSDictionary *names;
+    static CFAbsoluteTime builtAt = 0;
+    if (names && CFAbsoluteTimeGetCurrent() - builtAt < 60) return names;
+    NSMutableDictionary *map = [NSMutableDictionary new];
     LSApplicationWorkspace *workspace = SplitCarPlayWorkspace();
-    if (![workspace respondsToSelector:@selector(allInstalledApplications)]) return bundleID;
-    for (LSApplicationProxy *app in [workspace allInstalledApplications]) {
-        if ([SplitCarPlayAppBundleID(app) isEqualToString:bundleID]) {
-            return SplitCarPlayAppDisplayName(app);
+    if ([workspace respondsToSelector:@selector(allInstalledApplications)]) {
+        for (LSApplicationProxy *app in [workspace allInstalledApplications]) {
+            NSString *bundleID = SplitCarPlayAppBundleID(app);
+            if (bundleID.length) map[bundleID] = SplitCarPlayAppDisplayName(app) ?: bundleID;
         }
     }
-    return bundleID;
+    names = map;
+    builtAt = CFAbsoluteTimeGetCurrent();
+    return names;
 }
+
+NSString *SplitCarPlayDisplayNameForBundleID(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    return SplitCarPlayAllDisplayNames()[bundleID] ?: bundleID;
+}
+
+static UIImage *SplitCarPlayAppIconUncached(NSString *bundleID);
 
 UIImage *SplitCarPlayAppIcon(NSString *bundleID) {
     if (bundleID.length == 0) return nil;
+    static NSCache<NSString *, UIImage *> *cache;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ cache = [NSCache new]; });
+    UIImage *icon = [cache objectForKey:bundleID];
+    if (!icon) {
+        icon = SplitCarPlayAppIconUncached(bundleID);
+        if (icon) [cache setObject:icon forKey:bundleID];
+    }
+    return icon;
+}
+
+static UIImage *SplitCarPlayAppIconUncached(NSString *bundleID) {
     SEL sel = NSSelectorFromString(@"_applicationIconImageForBundleIdentifier:format:scale:");
     if (![UIImage respondsToSelector:sel]) return nil;
 
@@ -169,17 +196,17 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     // Separate backdrop view (behind the card) owns the dismiss tap, so
     // taps on the card never need to be filtered out.
     _backdrop = [[UIView alloc] init];
-    _backdrop.backgroundColor = [UIColor colorWithWhite:0 alpha:0.12];
+    _backdrop.backgroundColor = [UIColor colorWithWhite:0 alpha:0.25];
     [_backdrop addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(close)]];
     [self.view addSubview:_backdrop];
 
     // No masksToBounds so the soft shadow shows; the scroll view inside
     // is inset from the rounded corners and clips its own content.
     _card = [[UIView alloc] init];
-    _card.backgroundColor = [UIColor whiteColor];
+    _card.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor]; // follows light/dark
     _card.layer.cornerRadius = 16;
     _card.layer.borderWidth = hairline;
-    _card.layer.borderColor = [UIColor colorWithWhite:0.84 alpha:1].CGColor;
+    _card.layer.borderColor = [UIColor separatorColor].CGColor;
     _card.layer.shadowColor = [UIColor blackColor].CGColor;
     _card.layer.shadowOpacity = 0.14;
     _card.layer.shadowRadius = 18;
@@ -189,7 +216,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     _titleLabel = [[UILabel alloc] init];
     _titleLabel.text = self.pickerTitle;
     _titleLabel.font = [UIFont systemFontOfSize:17 weight:UIFontWeightSemibold];
-    _titleLabel.textColor = [UIColor colorWithWhite:0.1 alpha:1];
+    _titleLabel.textColor = [UIColor labelColor];
     [_card addSubview:_titleLabel];
 
     _closeButton = [UIButton buttonWithType:UIButtonTypeSystem];
@@ -203,7 +230,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     } else {
         [_closeButton setTitle:@"✕" forState:UIControlStateNormal];
     }
-    _closeButton.tintColor = [UIColor colorWithWhite:0.45 alpha:1];
+    _closeButton.tintColor = [UIColor secondaryLabelColor];
     _closeButton.accessibilityLabel = @"Đóng";
     [_closeButton addTarget:self action:@selector(close) forControlEvents:UIControlEventTouchUpInside];
     [_card addSubview:_closeButton];
@@ -227,7 +254,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:16].CGPath;
 
     _titleLabel.frame = CGRectMake(18, 14, cardFrame.size.width - 18 - 52, 24);
-    _closeButton.frame = CGRectMake(cardFrame.size.width - 46, 8, 36, 36);
+    _closeButton.frame = CGRectMake(cardFrame.size.width - 50, 4, 44, 44); // 44pt touch target
 
     // Stops 10pt short of the card's bottom so its square corners stay
     // inside the card's rounded ones.
@@ -241,6 +268,11 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 
 - (void)close {
     [self dismissViewControllerAnimated:YES completion:nil];
+}
+
+- (void)traitCollectionDidChange:(UITraitCollection *)previous {
+    [super traitCollectionDidChange:previous];
+    _card.layer.borderColor = [UIColor separatorColor].CGColor;
 }
 
 - (void)populateGrid {
@@ -259,7 +291,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 
 - (CGFloat)addSection:(NSString *)title bundleIDs:(NSArray<NSString *> *)bundleIDs startY:(CGFloat)y {
     // ~5 columns on a 375pt-wide phone (343pt card).
-    CGFloat sidePad = 14, iconSize = 56, labelH = 14, rowGap = 12;
+    CGFloat sidePad = 14, iconSize = 56, labelH = 16, rowGap = 12; // 16: room for Vietnamese stacked marks
     CGFloat contentW = MAX(1, _scroll.bounds.size.width - sidePad * 2);
     NSInteger columns = MAX((NSInteger)1, (NSInteger)floor(contentW / 62.0));
     CGFloat itemWidth = floor(contentW / columns);
@@ -269,7 +301,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
                                                                 _scroll.bounds.size.width - sidePad * 2, 18)];
     header.attributedText = [[NSAttributedString alloc] initWithString:title attributes:@{
         NSFontAttributeName: [UIFont systemFontOfSize:12 weight:UIFontWeightSemibold],
-        NSForegroundColorAttributeName: [UIColor colorWithWhite:0.55 alpha:1],
+        NSForegroundColorAttributeName: [UIColor secondaryLabelColor],
         NSKernAttributeName: @1.2,
     }];
     [_scroll addSubview:header];
@@ -297,7 +329,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
         UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(1, iconSize + 4, itemWidth - 2, labelH)];
         label.text = name;
         label.font = [UIFont systemFontOfSize:11];
-        label.textColor = [UIColor colorWithWhite:0.2 alpha:1];
+        label.textColor = [UIColor labelColor];
         label.textAlignment = NSTextAlignmentCenter;
         label.lineBreakMode = NSLineBreakByTruncatingTail;
         label.userInteractionEnabled = NO;

@@ -674,12 +674,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (instancetype)initWithFrame:(CGRect)frame {
     self = [super initWithFrame:frame];
     if (self) {
-        UIColor *paper = [UIColor colorWithWhite:0.985 alpha:1];
+        UIColor *paper = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.17 : 0.985) alpha:1]; }];
         self.backgroundColor = paper;
         self.layer.cornerRadius = 10;
         self.layer.masksToBounds = YES;
         self.layer.borderWidth = SCPHairline();
-        self.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+        self.layer.borderColor = [UIColor separatorColor].CGColor;
 
         _contentView = [[UIView alloc] init];
         _contentView.backgroundColor = paper;
@@ -691,7 +691,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         [_contentView addSubview:_snapshotView];
 
         _pickedTile = [[UIView alloc] init];
-        _pickedTile.backgroundColor = [UIColor whiteColor];
+        _pickedTile.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.22 : 1.0) alpha:1]; }];
         _pickedTile.layer.cornerRadius = 14;
         _pickedTile.layer.shadowColor = [UIColor blackColor].CGColor;
         _pickedTile.layer.shadowOpacity = 0.12;
@@ -707,7 +707,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
         _pickedName = [[UILabel alloc] init];
         _pickedName.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
-        _pickedName.textColor = [UIColor colorWithWhite:0.15 alpha:1];
+        _pickedName.textColor = [UIColor labelColor];
         _pickedName.textAlignment = NSTextAlignmentCenter;
         _pickedName.lineBreakMode = NSLineBreakByTruncatingTail;
         [_contentView addSubview:_pickedName];
@@ -718,7 +718,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         _pickedSubtitle = [[UILabel alloc] init];
         _pickedSubtitle.text = @"Mở app này 1 lần để có ảnh xem trước";
         _pickedSubtitle.font = [UIFont systemFontOfSize:11];
-        _pickedSubtitle.textColor = [UIColor colorWithWhite:0.5 alpha:1];
+        _pickedSubtitle.textColor = [UIColor secondaryLabelColor];
         _pickedSubtitle.textAlignment = NSTextAlignmentCenter;
         _pickedSubtitle.numberOfLines = 3;
         [_contentView addSubview:_pickedSubtitle];
@@ -727,7 +727,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         [_contentView addSubview:_emptyState];
 
         _bar = [[UIView alloc] init];
-        _bar.backgroundColor = [UIColor colorWithWhite:0.90 alpha:1];
+        _bar.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.24 : 0.90) alpha:1]; }];
         [self addSubview:_bar];
 
         // The "browser tab": same color as the content below so it reads
@@ -745,14 +745,14 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
         _tabLabel = [[UILabel alloc] init];
         _tabLabel.font = [UIFont systemFontOfSize:12 weight:UIFontWeightMedium];
-        _tabLabel.textColor = [UIColor colorWithWhite:0.2 alpha:1];
+        _tabLabel.textColor = [UIColor labelColor];
         _tabLabel.lineBreakMode = NSLineBreakByTruncatingTail;
         [_tabControl addSubview:_tabLabel];
 
         _tabChevron = [[UIImageView alloc] init];
         _tabChevron.contentMode = UIViewContentModeScaleAspectFit;
         _tabChevron.image = [SCPSymbol(@"chevron.down", 8, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-        _tabChevron.tintColor = [UIColor colorWithWhite:0.45 alpha:1];
+        _tabChevron.tintColor = [UIColor secondaryLabelColor];
         [_tabControl addSubview:_tabChevron];
 
         _reloadButton = SCPMakeCircleButton(@"arrow.clockwise");
@@ -774,7 +774,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _isEmpty = YES;
     _hasSnapshot = NO;
     _tabIcon.image = [SCPSymbol(@"plus", 11, NO) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
-    _tabIcon.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
+    _tabIcon.tintColor = [UIColor secondaryLabelColor];
     _tabIcon.layer.cornerRadius = 0;
     _tabLabel.text = @"Tab mới";
     _tabControl.accessibilityLabel = @"Tab mới, chọn app";
@@ -946,7 +946,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     // Reference screenshots show a big bold heading directly on a white
     // page, no visible nav bar. Hides the nav bar for just this tab's own
     // navigation controller and draws the heading as a real label instead.
-    self.view.backgroundColor = [UIColor whiteColor];
+    self.view.backgroundColor = [UIColor systemBackgroundColor];
     // Without this, batteryState stays Unknown and the card's battery row
     // never shows (nothing else in this app turns monitoring on).
     [UIDevice currentDevice].batteryMonitoringEnabled = YES;
@@ -954,16 +954,16 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _headingLabel = [[UILabel alloc] init];
     _headingLabel.text = @"Mô phỏng";
     _headingLabel.font = [UIFont boldSystemFontOfSize:34];
-    _headingLabel.textColor = [UIColor blackColor];
+    _headingLabel.textColor = [UIColor labelColor];
     [self.view addSubview:_headingLabel];
 
     // One outer "car screen" frame wrapping both panes -- the one physical
     // CarPlay display being split in two. Added behind the panes.
     _carScreenFrame = [[UIView alloc] init];
-    _carScreenFrame.backgroundColor = [UIColor colorWithWhite:0.95 alpha:1];
+    _carScreenFrame.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.11 : 0.95) alpha:1]; }];
     _carScreenFrame.layer.cornerRadius = 16;
     _carScreenFrame.layer.borderWidth = SCPHairline();
-    _carScreenFrame.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+    _carScreenFrame.layer.borderColor = [UIColor separatorColor].CGColor;
     _carScreenFrame.layer.shadowColor = [UIColor blackColor].CGColor;
     _carScreenFrame.layer.shadowOpacity = 0.06;
     _carScreenFrame.layer.shadowRadius = 10;
@@ -983,10 +983,10 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     [self.view addSubview:_dividerHandle];
 
     _dividerPill = [[UIView alloc] initWithFrame:CGRectMake(0, 0, 10, 56)];
-    _dividerPill.backgroundColor = [UIColor whiteColor];
+    _dividerPill.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.28 : 1.0) alpha:1]; }];
     _dividerPill.layer.cornerRadius = 5;
     _dividerPill.layer.borderWidth = SCPHairline();
-    _dividerPill.layer.borderColor = [UIColor colorWithWhite:0.78 alpha:1].CGColor;
+    _dividerPill.layer.borderColor = [UIColor separatorColor].CGColor;
     _dividerPill.layer.shadowColor = [UIColor blackColor].CGColor;
     _dividerPill.layer.shadowOpacity = 0.15;
     _dividerPill.layer.shadowRadius = 3;
@@ -994,7 +994,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _dividerPill.userInteractionEnabled = NO;
     for (NSInteger i = 0; i < 3; i++) { // "≡" grip
         UIView *line = [[UIView alloc] initWithFrame:CGRectMake(3, 23 + i * 4, 4, 1)];
-        line.backgroundColor = [UIColor colorWithWhite:0.5 alpha:1];
+        line.backgroundColor = [UIColor secondaryLabelColor];
         line.layer.cornerRadius = 0.5;
         [_dividerPill addSubview:line];
     }
@@ -1014,7 +1014,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     [_positionControl addTarget:self action:@selector(positionChanged:) forControlEvents:UIControlEventValueChanged];
 
     _captionLabel = [[UILabel alloc] init];
-    _captionLabel.textColor = [UIColor colorWithWhite:0.45 alpha:1];
+    _captionLabel.textColor = [UIColor secondaryLabelColor];
     _captionLabel.font = [UIFont systemFontOfSize:12];
     _captionLabel.textAlignment = NSTextAlignmentCenter;
     _captionLabel.numberOfLines = 0;
@@ -1048,11 +1048,11 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     [_edgeHandle addTarget:self action:@selector(edgeHandleTapped) forControlEvents:UIControlEventTouchUpInside];
     _edgeVisual = [[UIView alloc] init];
     _edgeVisual.userInteractionEnabled = NO;
-    _edgeVisual.backgroundColor = [UIColor whiteColor];
+    _edgeVisual.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.28 : 1.0) alpha:1]; }];
     _edgeVisual.layer.cornerRadius = 8;
     _edgeVisual.layer.maskedCorners = kCALayerMaxXMinYCorner | kCALayerMaxXMaxYCorner;
     _edgeVisual.layer.borderWidth = SCPHairline();
-    _edgeVisual.layer.borderColor = [UIColor colorWithWhite:0.80 alpha:1].CGColor;
+    _edgeVisual.layer.borderColor = [UIColor separatorColor].CGColor;
     _edgeVisual.layer.shadowColor = [UIColor blackColor].CGColor;
     _edgeVisual.layer.shadowOpacity = 0.12;
     _edgeVisual.layer.shadowRadius = 3;
@@ -1061,7 +1061,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _edgeChevron = [[UIImageView alloc] init];
     _edgeChevron.userInteractionEnabled = NO;
     _edgeChevron.contentMode = UIViewContentModeScaleAspectFit;
-    _edgeChevron.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
+    _edgeChevron.tintColor = [UIColor secondaryLabelColor];
     [_edgeVisual addSubview:_edgeChevron];
     [self.view addSubview:_edgeHandle];
     [self updateEdgeChevron];
@@ -1285,7 +1285,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         UILabel *header = [[UILabel alloc] initWithFrame:CGRectMake(x0, y, MAX(0, w - x0 - sidePad), 16)];
         header.text = @"Gần đây";
         header.font = [UIFont systemFontOfSize:13 weight:UIFontWeightSemibold];
-        header.textColor = [UIColor colorWithWhite:0.25 alpha:1];
+        header.textColor = [UIColor secondaryLabelColor];
         [emptyState addSubview:header];
         y += 24;
 
@@ -1294,7 +1294,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
             CGFloat x = x0 + i * (tile + gap);
             UIButton *button = [UIButton buttonWithType:UIButtonTypeCustom];
             button.frame = CGRectMake(x, y, tile, tile);
-            button.backgroundColor = [UIColor colorWithWhite:0.93 alpha:1];
+            button.backgroundColor = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.22 : 0.93) alpha:1]; }];
             button.layer.cornerRadius = 12;
             button.accessibilityIdentifier = bundleID;
             button.accessibilityLabel = _recentNames[bundleID];
@@ -1314,7 +1314,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
             UILabel *label = [[UILabel alloc] initWithFrame:CGRectMake(x - 4, y + tile + 4, tile + 8, 13)];
             label.text = _recentNames[bundleID] ?: bundleID;
             label.font = [UIFont systemFontOfSize:10];
-            label.textColor = [UIColor colorWithWhite:0.3 alpha:1];
+            label.textColor = [UIColor labelColor];
             label.textAlignment = NSTextAlignmentCenter;
             label.lineBreakMode = NSLineBreakByTruncatingTail;
             [emptyState addSubview:label];
@@ -1375,8 +1375,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
                   snapshot:SplitCarPlayAppSnapshot(bundleID)];
     }
 
-    UIColor *offFill = [UIColor colorWithWhite:0.85 alpha:1];
-    UIColor *offGlyph = [UIColor colorWithWhite:0.62 alpha:1];
+    UIColor *offFill = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.30 : 0.85) alpha:1]; }];
+    UIColor *offGlyph = [UIColor colorWithDynamicProvider:^UIColor *(UITraitCollection *t) { return [UIColor colorWithWhite:(t.userInterfaceStyle == UIUserInterfaceStyleDark ? 0.50 : 0.62) alpha:1]; }];
     UIColor *greenFill = [UIColor colorWithRed:0.30 green:0.80 blue:0.40 alpha:1];
     UIColor *greenGlyph = [UIColor colorWithRed:0.05 green:0.40 blue:0.14 alpha:1];
     UIColor *yellowFill = [UIColor colorWithRed:1.00 green:0.78 blue:0.20 alpha:1];

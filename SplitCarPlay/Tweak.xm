@@ -81,22 +81,8 @@ static void SplitCarPlayHostingLog(NSString *format, ...) {
     va_start(args, format);
     NSString *message = [[NSString alloc] initWithFormat:format arguments:args];
     va_end(args);
-
-    NSString *path = @"/var/mobile/Library/Logs/splitcarplay_hosting.log";
-    NSString *timestamp = [NSDateFormatter localizedStringFromDate:[NSDate date]
-                                                           dateStyle:NSDateFormatterNoStyle
-                                                           timeStyle:NSDateFormatterMediumStyle];
-    NSString *line = [NSString stringWithFormat:@"[%@] %@\n", timestamp, message];
-    // Also to the system log, in case this process can't write the file.
     NSLog(@"[SplitCarPlay/hosting] %@", message);
-    NSFileHandle *handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    if (!handle) {
-        [[NSFileManager defaultManager] createFileAtPath:path contents:nil attributes:nil];
-        handle = [NSFileHandle fileHandleForWritingAtPath:path];
-    }
-    [handle seekToEndOfFile];
-    [handle writeData:[line dataUsingEncoding:NSUTF8StringEncoding]];
-    [handle closeFile];
+    SCPHostAppendLog(message); // background queue, file capped at 512 KB
 }
 
 // Lists a class's class (+) and instance (-) methods, for the hosting log
@@ -234,7 +220,6 @@ static id getCarPlayDisplay(void) {
 //  real handshake/protocol with Vietmap Live.
 //
 static NSString * const kVietmapSharedStatePath = @"/var/mobile/Library/Caches/com.example.splitcarplay/vietmap_speed.plist";
-static NSString * const kVietmapUpdateDarwinNotification = @"com.example.splitcarplay/vietmap-update";
 static const NSTimeInterval kVietmapStaleAfter = 6.0; // consider "disconnected" if no fresh update
 
 // Bubble "look" — SidePlay2 (a commercial tweak in the same category;
@@ -312,6 +297,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     UILabel *_barExtrasLabel;    // "Bar" style: date/battery/now-playing combined
     BOOL _connected;
     BOOL _overLimit;
+    NSString *_layoutKey; // what -tick last laid out for
 }
 
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -328,10 +314,9 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
         _maskLayer = [CAShapeLayer new];
         self.layer.mask = _maskLayer;
 
-        self.layer.shadowColor = [UIColor blackColor].CGColor;
-        self.layer.shadowOpacity = 0.25;
-        self.layer.shadowRadius = 6;
-        self.layer.shadowOffset = CGSizeMake(0, 2);
+        // No shadow: the rounded-corner mask clipped it anyway, and it
+        // only cost an extra offscreen render pass on every frame.
+        self.layer.shadowOpacity = 0;
 
 
         _speedBox = [[UIView alloc] init];
@@ -669,7 +654,13 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     if (extras.length > 0) [barParts addObject:extras];
     if (self.showNowPlaying && _nowPlayingLabel.text.length > 0) [barParts addObject:_nowPlayingLabel.text];
     _barExtrasLabel.text = [barParts componentsJoinedByString:@" · "];
-    [self setNeedsLayout];
+    // Texts change in place; only re-layout when a row appears/disappears.
+    NSString *key = [NSString stringWithFormat:@"%ld-%d-%d-%d", (long)self.style, hasBattery,
+                     _nowPlayingLabel.text.length > 0, self.showDate];
+    if (![key isEqualToString:_layoutKey]) {
+        _layoutKey = key;
+        [self setNeedsLayout];
+    }
 }
 
 - (void)applyNowPlayingText:(NSString *)text {
@@ -940,6 +931,7 @@ static void SplitCarPlayRestoreBrightness(void) {
 
 - (void)startSessionOnDisplay:(CADisplay *)carPlayDisplay prefs:(NSDictionary *)prefs {
     NSUInteger generation = ++self.sessionGeneration;
+    SplitCarPlayHostingLog(@"[mem] car-start %@ kept=%lu", SCPMemLine(), (unsigned long)SCPHostKeptObjectCount());
     SplitCarPlayHostingLog(@"[car] start: display=%@ single=%d left=%@ right=%@",
                             carPlayDisplay, self.singleAppMode, prefs[@"leftBundleID"], prefs[@"rightBundleID"]);
     @try {
@@ -1210,6 +1202,20 @@ static void SplitCarPlayRestoreBrightness(void) {
 }
 
 - (void)keepAliveTick {
+    CFTimeInterval tickStart = CACurrentMediaTime();
+    static NSUInteger ticks = 0;
+    if (++ticks % 40 == 0) { // ~every 60 s while on the car
+        UIDevice *device = [UIDevice currentDevice];
+        SplitCarPlayHostingLog(@"[mem] car-60s %@ batt=%.0f%% thermal=%ld kept=%lu", SCPMemLine(),
+                                device.batteryLevel * 100, (long)[NSProcessInfo processInfo].thermalState,
+                                (unsigned long)SCPHostKeptObjectCount());
+    }
+    [self keepAliveTickBody];
+    double ms = (CACurrentMediaTime() - tickStart) * 1000;
+    if (ms > 8) SplitCarPlayHostingLog(@"[slow] keepAliveTick %.1fms", ms);
+}
+
+- (void)keepAliveTickBody {
     @try {
         for (SplitCarPlayCarSlot *slot in [self.slots copy]) {
             if (!slot.hosted) continue;
@@ -1255,6 +1261,7 @@ static void SplitCarPlayRestoreBrightness(void) {
 // The app is gone: hide its view, don't touch its scene, never free it.
 - (void)dropSlot:(SplitCarPlayCarSlot *)slot message:(NSString *)message {
     SplitCarPlayHostingLog(@"[car]   drop %@: %@", slot.bundleID, message);
+    SplitCarPlayHostingLog(@"[mem] car-drop %@ kept=%lu", SCPMemLine(), (unsigned long)SCPHostKeptObjectCount());
     slot.hosted = NO;
     slot.finished = YES;
     slot.appViewController.view.hidden = YES;
@@ -1527,6 +1534,10 @@ static void SplitCarPlayRestoreBrightness(void) {
     self.dividerView = nil;
     window.hidden = YES; // the normal CarPlay UI is back right away
     SCPHostKeepForever(window);
+    // Our bubble/app bar/labels go now; app views stay in their containers.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(4.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        SCPHostStripOwnViews(window);
+    });
     [self releaseSlots:slots index:0];
 }
 
@@ -1537,6 +1548,7 @@ static void SplitCarPlayRestoreBrightness(void) {
         SCPHostSetCarPlaySessionActive(NO);
         [self publishCarPlayState];
         SplitCarPlayHostingLog(@"[car] stop: done");
+        SplitCarPlayHostingLog(@"[mem] car-stop %@ kept=%lu", SCPMemLine(), (unsigned long)SCPHostKeptObjectCount());
         // Marker cleared a bit later, so a crash right after closing counts.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!self.rootWindow && !self.tearingDown) SplitCarPlayWritePref(@"carPlaySessionActive", @NO);
@@ -1592,13 +1604,21 @@ static void SplitCarPlayRestoreBrightness(void) {
 
 - (void)refreshSpeedBubble {
     if (!self.speedBubble || self.speedBubble.hidden) return;
-    // Two possible sources: the shared file (may be blocked by Vietmap
-    // Live's sandbox) and the Darwin-notify state (see
-    // SplitCarPlayShared.h). Use whichever is newer.
-    NSDictionary *fileState = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
-    NSDictionary *notifyState = SCPReadSpeedState();
-    NSDictionary *state = fileState;
-    if ([notifyState[@"timestamp"] doubleValue] > [fileState[@"timestamp"] doubleValue]) state = notifyState;
+    // Bursts of notifications: at most one refresh per 0.3 s.
+    CFTimeInterval started = CACurrentMediaTime();
+    static CFTimeInterval lastRefresh = 0;
+    if (started - lastRefresh < 0.3) return;
+    lastRefresh = started;
+
+    // The notify state (no disk access) is the main source; the shared file
+    // (which Vietmap Live's sandbox may block) is read only when the notify
+    // state is missing or more than 3 s old.
+    NSDictionary *state = SCPReadSpeedState();
+    NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
+    if (now - [state[@"timestamp"] doubleValue] > 3.0) {
+        NSDictionary *fileState = [NSDictionary dictionaryWithContentsOfFile:kVietmapSharedStatePath];
+        if ([fileState[@"timestamp"] doubleValue] > [state[@"timestamp"] doubleValue]) state = fileState;
+    }
     [self.speedBubble applyState:state ?: @{}]; // empty state renders as "disconnected"
     [self.speedBubble tick];
 
@@ -1613,7 +1633,10 @@ static void SplitCarPlayRestoreBrightness(void) {
         self.lastSpeedAudioAlertAt = nil; // next over-limit episode alerts immediately
     }
 
-    if (self.speedBubble.showNowPlaying && SplitCarPlayMRGetNowPlayingInfo) {
+    static CFTimeInterval lastNowPlaying = 0;
+    BOOL nowPlayingDue = started - lastNowPlaying > 10.0; // an XPC round trip; the song doesn't change every 2 s
+    if (self.speedBubble.showNowPlaying && SplitCarPlayMRGetNowPlayingInfo && nowPlayingDue) {
+        lastNowPlaying = started;
         __weak SpeedBubbleView *weakBubble = self.speedBubble;
         SplitCarPlayMRGetNowPlayingInfo(dispatch_get_main_queue(), ^(NSDictionary *information) {
             NSString *title = information[@"kMRMediaRemoteNowPlayingInfoTitle"];
@@ -1626,7 +1649,8 @@ static void SplitCarPlayRestoreBrightness(void) {
         });
     } else if (!self.speedBubble.showNowPlaying) {
         [self.speedBubble applyNowPlayingText:nil];
-    }
+    }    double ms = (CACurrentMediaTime() - started) * 1000;
+    if (ms > 4) SplitCarPlayHostingLog(@"[slow] refreshSpeedBubble %.1fms", ms);
 }
 
 @end
@@ -1705,19 +1729,9 @@ static void SplitCarPlayRestoreBrightness(void) {
             NULL,
             CFNotificationSuspensionBehaviorDeliverImmediately);
 
-        // Posted by VietmapLiveHook.xm (same dylib, running inside Vietmap
-        // Live's own process) whenever it
-        // picks up a new speed-limit reading from Vietmap Live.
-        CFNotificationCenterAddObserver(
-            CFNotificationCenterGetDarwinNotifyCenter(),
-            NULL,
-            (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
-                                        const void *object, CFDictionaryRef userInfo) {
-                [[SplitCarPlayController sharedInstance] refreshSpeedBubble];
-            },
-            (__bridge CFStringRef)kVietmapUpdateDarwinNotification,
-            NULL,
-            CFNotificationSuspensionBehaviorDeliverImmediately);
+        // VietmapLiveHook.xm posts both the old "vietmap-update" and the
+        // notify-state notification for each reading; listening to one is
+        // enough (listening to both refreshed the bubble twice per update).
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
             NULL,

@@ -23,7 +23,7 @@ static inline NSDictionary *SCPDefaultPrefs(void) {
     return @{
         @"enabled": @YES,
         @"experimentalHostingEnabled": @NO, // one-shot test switch, see Tweak.xm reloadFromPreferences
-        @"experimentalSingleApp": @YES,      // milestone 1: one app full-width
+        @"experimentalSingleApp": @NO,       // 0.9.0: split by default (was one app full-width)
         @"leftBundleID": @"com.apple.Maps",
         @"rightBundleID": @"com.apple.Music",
         @"splitRatio": @0.5,
@@ -69,6 +69,12 @@ static inline NSDictionary *SCPCopyPrefs(void) {
 static inline void SCPSetPref(NSString *key, id value) {
     CFPreferencesSetAppValue((__bridge CFStringRef)key, (__bridge CFPropertyListRef)value, SCP_PREFS_DOMAIN);
     CFPreferencesAppSynchronize(SCP_PREFS_DOMAIN);
+}
+
+// "Đang bật" (Trang chủ) and "Mở khi kết nối CarPlay" (Trên xe) are one
+// setting; both screens show this, so they can never disagree.
+static inline BOOL SCPIsCarPlayOn(NSDictionary *prefs) {
+    return [prefs[@"carPlayAutoHost"] boolValue] && [prefs[@"enabled"] boolValue];
 }
 
 static inline void SCPPostReload(void) {
