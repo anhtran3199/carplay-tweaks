@@ -13,7 +13,7 @@ Target device so far: iPhone 7, iOS 15.8.8, Dopamine 2 (rootless).
 |---|---|
 | Companion app (`SplitCarPlayApp/`: Trang chủ / Trên xe / Mô phỏng / Tài khoản) | Builds in CI; not yet confirmed on-device |
 | Speed card data from Vietmap Live (`VietmapLiveHook.xm`) | Written, payload shape still to confirm with the call logger |
-| On-car hosting (`Tweak.xm`) | **Not working yet.** Opt-in, one-shot experiment with fail-safes |
+| On-car hosting (`Tweak.xm`) | 0.8.0: rebuilt on the hosting that works on the phone; **not yet tested in a car**. Opt-in, one-shot |
 | "Enable any app" for CarPlay (`CarPlayEnableHook.xm`) | Best-effort reconstruction; only active while the experiment is armed |
 
 The Settings-app panel (`Prefs.bundle`) was removed in 0.6.0: the app
@@ -21,23 +21,30 @@ replaced it, and the two copies of the preview screen had drifted apart.
 
 ### How on-car hosting works (and what's still unknown)
 
-All window/hosting code runs **in SpringBoard only**. The `SB*` classes it
-needs (`SBApplicationController`, `SBSceneManagerCoordinator`,
-`SBAppViewController`) don't exist in CarPlayApp; the first hardware test
-ran in CarPlayApp, every step failed, and the empty black window it had
-already shown blanked the CarPlay screen.
+All window/hosting code runs **in SpringBoard only** (the `SB*` classes
+don't exist in CarPlayApp; the first hardware test ran there and only
+blanked the CarPlay screen).
 
-The approach (as in the open-source
-[`carplay-cast`](https://github.com/EthanArbuckle/carplay-cast)) is to get
-the app's normal phone scene from `+[SBSceneManagerCoordinator
-mainDisplaySceneManager]` and re-parent its view into a `UIRootSceneWindow`
-on the CarPlay `CADisplay`.
+0.8.0 drops the old `SBApplicationSceneHandleRequest` path, which never
+worked, and uses the phone preview's hosting core (`LivePreview.xm`,
+shared through `SCPHosting.h`): launch each app suspended, wrap its
+main-display scene (`SBDeviceApplicationSceneEntity
+initWithApplicationForMainDisplay:` + `SBAppViewController`,
+`setRequestedMode:2`), keep the scene foreground at phone width and scale
+the view to its half of the car screen, never free a view controller,
+close one app at a time. The window is a `UIRootSceneWindow` on the
+CarPlay `CADisplay` (as in
+[`carplay-cast`](https://github.com/EthanArbuckle/carplay-cast)), the part
+that already worked in the first car test. A CarPlay session closes the
+phone preview and blocks it until the session ends, so an app's view is
+never in both places.
 
-Still unconfirmed on iOS 15: how `SBApplicationSceneHandleRequest` is
-constructed. The code tries `requestForApplication:sceneIdentity:` and
-`defaultRequestForApplication:sceneIdentity:displayIdentity:`; if neither
-exists it writes the class's real method list to the log, so the next
-build can use the right one. The app may also need to be launched first.
+Still unknown until a car test (all logged with a `[car]` prefix):
+
+- whether touches on the car screen reach the hosted apps (the log lists
+  `_UISystemGestureManager`'s display methods in case they need routing);
+- whether the scenes stay foreground while the phone is locked (try
+  unlocked first).
 
 ### Fail-safes (why it's now safe to try)
 
@@ -45,7 +52,7 @@ build can use the right one. The app may also need to be launched first.
   switch turns itself **off** as soon as an attempt starts, so a failed
   attempt can't repeat on the next CarPlay connect.
 - The CarPlay window stays hidden until an app view with a real size is
-  attached. If nothing is hosted within **6 seconds**, it's torn down.
+  attached. If nothing is hosted within **12 seconds**, it's torn down.
 - On the car screen: a **✕** button (top-left) and a **two-finger long
   press** (1 s) both close it and give the normal CarPlay UI back.
 - First milestone is one app full-width ("Chỉ 1 app toàn màn hình",

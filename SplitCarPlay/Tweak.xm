@@ -44,6 +44,7 @@
 #import <AudioToolbox/AudioToolbox.h>
 #import <dlfcn.h>
 #import "SplitCarPlayShared.h"
+#import "SCPHosting.h"
 
 #pragma mark - MediaRemote (now-playing widget) — real private API, dlopen'd (no framework stub needed)
 //
@@ -711,27 +712,58 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
 @end
 
 #pragma mark - Controller
+//
+//  0.8.0: the CarPlay window hosts apps the same way the phone preview
+//  does (LivePreview.xm, through SCPHosting.h), because that way works on
+//  the device: launch suspended, SBDeviceApplicationSceneEntity
+//  initWithApplicationForMainDisplay: + SBAppViewController, setRequestedMode:2,
+//  keep the scene foreground and phone-width (view scaled to the pane),
+//  never free a view controller, close one app at a time.
+//
+//  The window itself (CADisplay -> FBSDisplayConfiguration ->
+//  UIRootSceneWindow) is the part that already worked in the first car test.
+//
+//  Still unknown until a car test: whether touches on the car screen reach
+//  the hosted apps (the log lists _UISystemGestureManager's display-related
+//  methods for that), and whether the scenes stay foreground while the
+//  phone is locked.
+
+@interface SplitCarPlayCarSlot : NSObject
+@property (nonatomic, copy) NSString *bundleID;
+@property (nonatomic, strong) UIView *container;
+@property (nonatomic, strong) UILabel *messageLabel;
+@property (nonatomic, strong) id application;
+@property (nonatomic, strong) UIViewController *appViewController;
+@property (nonatomic, strong) id sceneHandle;
+@property (nonatomic, strong) id scene;
+@property (nonatomic, assign) BOOL hosted;
+@property (nonatomic, assign) BOOL finished;
+@property (nonatomic, assign) NSInteger deadStrikes;
+@property (nonatomic, assign) NSInteger reassertStreak;
+@property (nonatomic, assign) NSInteger reassertCount;
+@end
+
+@implementation SplitCarPlayCarSlot
+@end
 
 @interface SplitCarPlayController : NSObject
 @property (nonatomic, strong) UIWindow *rootWindow;
-@property (nonatomic, strong) UIView *leftContainer;
-@property (nonatomic, strong) UIView *rightContainer;
+@property (nonatomic, strong) NSMutableArray<SplitCarPlayCarSlot *> *slots;
 @property (nonatomic, strong) UIView *dividerView;
-@property (nonatomic, strong) UIViewController *leftAppVC;
-@property (nonatomic, strong) UIViewController *rightAppVC;
 @property (nonatomic, strong) SpeedBubbleView *speedBubble;
 @property (nonatomic, strong) NSTimer *speedBubbleStaleTimer;
+@property (nonatomic, strong) NSTimer *keepAliveTimer;
 @property (nonatomic, assign) CGFloat splitRatio; // 0..1, left width fraction
 @property (nonatomic, assign) BOOL speedAudioAlertEnabled;
 @property (nonatomic, assign) BOOL autoExitSourceAppEnabled;
 @property (nonatomic, strong) NSDate *lastSpeedAudioAlertAt;
-// Experimental hosting session state (see reloadFromPreferences).
 @property (nonatomic, assign) BOOL hostingSessionActive; // keeps the session alive after the pref is auto-disarmed
-@property (nonatomic, assign) BOOL singleAppMode;        // milestone 1: one app full-width, no split
-@property (nonatomic, assign) NSUInteger sessionGeneration; // invalidates a pending watchdog after teardown
+@property (nonatomic, assign) BOOL singleAppMode;        // one app full-width, no split
+@property (nonatomic, assign) BOOL tearingDown;
+@property (nonatomic, assign) NSTimeInterval hostDelay;
+@property (nonatomic, assign) NSUInteger sessionGeneration; // invalidates pending callbacks after teardown
 @property (nonatomic, strong) UIButton *carCloseButton;
 + (instancetype)sharedInstance;
-- (void)activateOnDisplay:(id)carPlayDisplay;
 - (void)teardown;
 - (void)reloadFromPreferences;
 - (void)refreshSpeedBubble;
@@ -755,77 +787,52 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     return SCPCopyPrefs(); // defaults + stored values, see SplitCarPlayShared.h
 }
 
+// Called on CarPlay connect, on every pref change (the app posts reload)
+// and 3 s after SpringBoard starts. A session only STARTS when the
+// one-shot switch "⚠️ Bật thử nghiệm (1 lần)" is on; once running, pref
+// changes only restyle the bubble (the hosted apps stay as they are).
 - (void)reloadFromPreferences {
-    // DISABLED BY DEFAULT pending an architecture pivot -- see
-    // ROADMAP.md. First real-CarPlay-hardware test of hostApp:/
-    // activateOnDisplay: left the CarPlay screen blank (the window got
-    // created -- the VERIFIED part -- but every app-hosting call
-    // silently failed, the ADAPT part), which actively breaks normal
-    // CarPlay use while driving.
-    //
-    // "experimentalHostingEnabled" is a SEPARATE flag from "enabled" --
-    // deliberately not reusing "enabled" so this can't get silently
-    // re-armed by anything that still writes the old key. Must be
-    // turned on explicitly (via "Trên xe"'s clearly-labeled warning
-    // toggle) for this to run at all; every step is now logged to
-    // /var/mobile/Library/Logs/splitcarplay_hosting.log (see
-    // SplitCarPlayHostingLog) so a next real-CarPlay test actually
-    // produces debuggable evidence instead of just "blank again."
     NSDictionary *prefs = [self loadPreferences];
 
-    // Settings that don't depend on the CarPlay window -- read them before
-    // the experimental gate so they work even while hosting is off.
     self.autoExitSourceAppEnabled = [prefs[@"autoExitSourceApp"] boolValue];
     self.speedAudioAlertEnabled = [prefs[@"speedAudioAlert"] boolValue];
-    // Clamp like the divider pan does: a missing/0 value would otherwise
-    // give negative container widths.
-    double ratio = [prefs[@"splitRatio"] doubleValue];
-    self.splitRatio = (ratio > 0) ? MAX(0.2, MIN(0.8, ratio)) : 0.5;
 
-    // A session that already started stays alive even though the pref was
-    // auto-disarmed when it began (one-shot, see below).
     BOOL armed = [prefs[@"experimentalHostingEnabled"] boolValue] || self.hostingSessionActive;
     if (!armed || ![prefs[@"enabled"] boolValue]) {
-        [self teardown];
+        [self teardown]; // no window: just clears flags a crash may have left
         return;
     }
+    if (self.tearingDown) return;
 
     id carPlayDisplay = getCarPlayDisplay();
     if (!carPlayDisplay) return; // not connected to a car yet
 
     if (!self.rootWindow) {
-        // One-shot: turn the switch off BEFORE the risky calls, so even a
-        // hard crash (not catchable by @try) inside activateOnDisplay:
-        // can't make SpringBoard retry on every respawn. Re-arm it in the
-        // app for each test. Tell CarPlayApp a session is starting first
-        // (CarPlayEnableHook checks this, since the pref is now off).
-        SCPSetHostingSessionActive(YES);
+        // One-shot: turn the switch off BEFORE anything risky, so a hard
+        // crash can't make SpringBoard retry on every respawn. Re-arm it in
+        // the app for each test.
         SplitCarPlayWritePref(@"experimentalHostingEnabled", @NO);
-        [self activateOnDisplay:carPlayDisplay];
-        if (!self.rootWindow) return; // activation failed and tore itself down
+        SCPSetHostingSessionActive(YES);       // CarPlayEnableHook reads this
+        BOOL phonePreviewWasRunning = SCPHostSetCarPlaySessionActive(YES); // closes the phone preview, blocks it meanwhile
+        self.hostDelay = phonePreviewWasRunning ? 3.0 : 0.0; // let the phone preview let go of the apps first
+        double ratio = [prefs[@"splitRatio"] doubleValue];
+        self.splitRatio = (ratio > 0) ? MAX(0.2, MIN(0.8, ratio)) : 0.5;
+        self.singleAppMode = [prefs[@"experimentalSingleApp"] boolValue];
+        [self startSessionOnDisplay:carPlayDisplay prefs:prefs];
+        if (!self.rootWindow) {
+            SCPSetHostingSessionActive(NO);
+            SCPHostSetCarPlaySessionActive(NO);
+            return;
+        }
         self.hostingSessionActive = YES;
-        [self startWatchdog];
     }
 
-    self.singleAppMode = [prefs[@"experimentalSingleApp"] boolValue];
     self.dividerView.hidden = self.singleAppMode || ![prefs[@"showDivider"] boolValue];
-    self.rightContainer.hidden = self.singleAppMode;
-    if (self.singleAppMode) {
-        // Switching split -> single mid-session: drop the right app too.
-        for (UIView *old in [self.rightContainer.subviews copy]) [old removeFromSuperview];
-        self.rightAppVC = nil;
-    }
+    [self applyBubblePrefs:prefs];
+}
 
-    // Lay out first so the containers have a real size when hostApp: reads
-    // container.bounds (they start at CGRectZero).
-    [self layoutContainers];
-    [self hostApp:prefs[@"leftBundleID"] inContainer:self.leftContainer replacingExisting:&_leftAppVC];
-    if (!self.singleAppMode) {
-        [self hostApp:prefs[@"rightBundleID"] inContainer:self.rightContainer replacingExisting:&_rightAppVC];
-    }
-    [self layoutContainers];
-    [self revealIfHosted];
-
+- (void)applyBubblePrefs:(NSDictionary *)prefs {
+    if (!self.speedBubble) return;
     self.speedBubble.hidden = ![prefs[@"showSpeedBubble"] boolValue];
     self.speedBubble.style = (SplitCarPlayBubbleStyle)[prefs[@"bubbleStyle"] integerValue];
     self.speedBubble.showDate = [prefs[@"showDate"] boolValue];
@@ -833,17 +840,7 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     self.speedBubble.showNowPlaying = [prefs[@"showNowPlaying"] boolValue];
     self.speedBubble.scale = prefs[@"bubbleScale"] ? [prefs[@"bubbleScale"] doubleValue] : 1.0;
 
-    // Resize to fit whichever style is active (a Card needs more vertical
-    // room than a compact Ring or a wide-short Bar), and re-apply the
-    // left/right side pref every reload -- that's a deliberate placement
-    // choice from Settings, not something a one-off drag should silently
-    // override. Vertical position (y) is left alone so dragging the
-    // bubble up/down still sticks.
-    //
-    // Uses bounds+center rather than .frame: the bubble now carries a
-    // pinch-driven scale transform (see SpeedBubbleView.scale above), and
-    // per Apple's docs, -frame (both reading AND writing it) is undefined
-    // once a view's transform isn't the identity transform.
+    // bounds + center, not frame: the bubble carries a pinch scale transform.
     CGPoint center = self.speedBubble.center;
     CGRect bounds = self.speedBubble.bounds;
     switch (self.speedBubble.style) {
@@ -856,126 +853,339 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     CGFloat originX = bubbleOnLeft ? 16 : (screenWidth - bounds.size.width - 16);
     self.speedBubble.bounds = bounds;
     self.speedBubble.center = CGPointMake(originX + bounds.size.width / 2.0, center.y);
-
     if (!self.speedBubble.hidden) [self refreshSpeedBubble];
 }
 
-#pragma mark Window / display setup — VERIFIED path
+#pragma mark Window on the CarPlay display
 
-- (void)activateOnDisplay:(CADisplay *)carPlayDisplay {
-    SplitCarPlayHostingLog(@"activateOnDisplay: begin, carPlayDisplay=%@", carPlayDisplay);
+- (void)startSessionOnDisplay:(CADisplay *)carPlayDisplay prefs:(NSDictionary *)prefs {
+    NSUInteger generation = ++self.sessionGeneration;
+    SplitCarPlayHostingLog(@"[car] start: display=%@ single=%d left=%@ right=%@",
+                            carPlayDisplay, self.singleAppMode, prefs[@"leftBundleID"], prefs[@"rightBundleID"]);
     @try {
-    FBSDisplayConfiguration *config =
-        [[objc_getClass("FBSDisplayConfiguration") alloc] initWithCADisplay:carPlayDisplay
-                                                                isMainDisplay:NO];
-    SplitCarPlayHostingLog(@"  FBSDisplayConfiguration = %@", config);
-    self.rootWindow = [[objc_getClass("UIRootSceneWindow") alloc] initWithDisplayConfiguration:config];
-    SplitCarPlayHostingLog(@"  rootWindow = %@ bounds=%@", self.rootWindow, NSStringFromCGRect(self.rootWindow.bounds));
-    self.rootWindow.backgroundColor = [UIColor blackColor];
+        FBSDisplayConfiguration *config =
+            [[objc_getClass("FBSDisplayConfiguration") alloc] initWithCADisplay:carPlayDisplay isMainDisplay:NO];
+        SplitCarPlayHostingLog(@"[car]   FBSDisplayConfiguration = %@", config);
+        self.rootWindow = [[objc_getClass("UIRootSceneWindow") alloc] initWithDisplayConfiguration:config];
+        SplitCarPlayHostingLog(@"[car]   rootWindow = %@ bounds=%@", self.rootWindow, NSStringFromCGRect(self.rootWindow.bounds));
+        if (!self.rootWindow) return;
+        self.rootWindow.backgroundColor = [UIColor blackColor];
+        [self logTouchRoutingCandidates];
 
-    CGRect bounds = self.rootWindow.bounds;
+        // Slots: left always; right unless single-app mode or same app.
+        NSString *leftID = prefs[@"leftBundleID"];
+        NSString *rightID = prefs[@"rightBundleID"];
+        NSMutableArray<NSString *> *ids = [NSMutableArray new];
+        if (leftID.length) [ids addObject:leftID];
+        if (!self.singleAppMode && rightID.length && ![rightID isEqualToString:leftID]) [ids addObject:rightID];
+        if (ids.count == 0) {
+            SplitCarPlayHostingLog(@"[car]   ABORT: no app picked");
+            [self dropWindowNow];
+            return;
+        }
+        if (ids.count == 1) self.singleAppMode = YES;
 
-    self.leftContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    self.leftContainer.clipsToBounds = YES;
-    self.rightContainer = [[UIView alloc] initWithFrame:CGRectZero];
-    self.rightContainer.clipsToBounds = YES;
+        self.slots = [NSMutableArray new];
+        for (NSString *bundleID in ids) {
+            SplitCarPlayCarSlot *slot = [SplitCarPlayCarSlot new];
+            slot.bundleID = bundleID;
+            slot.container = [[UIView alloc] initWithFrame:CGRectZero];
+            slot.container.clipsToBounds = YES;
+            slot.container.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
+            [self.rootWindow addSubview:slot.container];
+            [self.slots addObject:slot];
+        }
 
-    self.dividerView = [[UIView alloc] initWithFrame:CGRectZero];
-    self.dividerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
-    self.dividerView.layer.cornerRadius = 3;
-    UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self
-                                                                           action:@selector(handleDividerPan:)];
-    [self.dividerView addGestureRecognizer:pan];
-    self.dividerView.userInteractionEnabled = YES;
+        self.dividerView = [[UIView alloc] initWithFrame:CGRectZero];
+        self.dividerView.backgroundColor = [UIColor colorWithWhite:1.0 alpha:0.35];
+        self.dividerView.layer.cornerRadius = 3;
+        UIPanGestureRecognizer *pan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(handleDividerPan:)];
+        [self.dividerView addGestureRecognizer:pan];
+        [self.rootWindow addSubview:self.dividerView];
 
-    CGFloat cardWidth = 116, cardHeight = 266;
-    self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - cardWidth - 16,
-                                                                           16, cardWidth, cardHeight)];
-    self.speedBubble.onScaleChanged = ^(CGFloat scale) {
-        SplitCarPlayWritePref(@"bubbleScale", @(scale));
-    };
+        CGRect bounds = self.rootWindow.bounds;
+        self.speedBubble = [[SpeedBubbleView alloc] initWithFrame:CGRectMake(bounds.size.width - 116 - 16, 16, 116, 266)];
+        self.speedBubble.onScaleChanged = ^(CGFloat scale) {
+            SplitCarPlayWritePref(@"bubbleScale", @(scale));
+        };
+        [self.rootWindow addSubview:self.speedBubble];
 
-    [self.rootWindow addSubview:self.leftContainer];
-    [self.rootWindow addSubview:self.rightContainer];
-    [self.rootWindow addSubview:self.dividerView];
-    [self.rootWindow addSubview:self.speedBubble]; // on top, so it floats over both halves
+        // Always-available way out on the car screen: ✕ and a two-finger
+        // long press. Both give the normal CarPlay UI back.
+        self.carCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
+        [self.carCloseButton setTitle:@"✕" forState:UIControlStateNormal];
+        self.carCloseButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
+        self.carCloseButton.tintColor = [UIColor whiteColor];
+        self.carCloseButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
+        self.carCloseButton.layer.cornerRadius = 22;
+        self.carCloseButton.frame = CGRectMake(12, 12, 44, 44);
+        [self.carCloseButton addTarget:self action:@selector(closeFromCar) forControlEvents:UIControlEventTouchUpInside];
+        [self.rootWindow addSubview:self.carCloseButton];
 
-    // Always-available way out on the car screen itself: a ✕ button, plus
-    // a two-finger long press anywhere. Both just tear the window down,
-    // which gives the normal CarPlay UI back.
-    self.carCloseButton = [UIButton buttonWithType:UIButtonTypeSystem];
-    [self.carCloseButton setTitle:@"✕" forState:UIControlStateNormal];
-    self.carCloseButton.titleLabel.font = [UIFont boldSystemFontOfSize:22];
-    self.carCloseButton.tintColor = [UIColor whiteColor];
-    self.carCloseButton.backgroundColor = [UIColor colorWithWhite:0 alpha:0.55];
-    self.carCloseButton.layer.cornerRadius = 22;
-    self.carCloseButton.frame = CGRectMake(12, 12, 44, 44);
-    [self.carCloseButton addTarget:self action:@selector(closeFromCar) forControlEvents:UIControlEventTouchUpInside];
-    [self.rootWindow addSubview:self.carCloseButton]; // topmost
+        UILongPressGestureRecognizer *escape = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleEscapeGesture:)];
+        escape.numberOfTouchesRequired = 2;
+        escape.minimumPressDuration = 1.0;
+        escape.cancelsTouchesInView = NO;
+        [self.rootWindow addGestureRecognizer:escape];
 
-    UILongPressGestureRecognizer *escape = [[UILongPressGestureRecognizer alloc] initWithTarget:self action:@selector(handleEscapeGesture:)];
-    escape.numberOfTouchesRequired = 2;
-    escape.minimumPressDuration = 1.0;
-    escape.cancelsTouchesInView = NO;
-    [self.rootWindow addGestureRecognizer:escape];
+        [self.speedBubbleStaleTimer invalidate];
+        self.speedBubbleStaleTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 target:self
+                                                                      selector:@selector(refreshSpeedBubble)
+                                                                      userInfo:nil repeats:YES];
 
-    // VietmapLiveHook.xm only notifies us when it has a fresh value — if it
-    // goes quiet (Vietmap Live closed, heuristic stops matching) nothing
-    // will tell us that, so poll periodically to flip the card to
-    // "disconnected" once the last value goes stale.
-    [self.speedBubbleStaleTimer invalidate];
-    self.speedBubbleStaleTimer = [NSTimer scheduledTimerWithTimeInterval:2.0
-                                                                    target:self
-                                                                  selector:@selector(refreshSpeedBubble)
-                                                                  userInfo:nil
-                                                                   repeats:YES];
+        [self layoutContainers];
+        // Hidden until an app view is attached: an opaque empty window is
+        // what blanked the CarPlay screen in the first test.
+        self.rootWindow.hidden = YES;
 
-    // Stay HIDDEN until an app view is actually attached (revealIfHosted).
-    // Showing an opaque empty window first is exactly what blanked the
-    // CarPlay screen last time. Also no makeKeyAndVisible: in SpringBoard
-    // that would steal key-window status from the phone's own UI.
-    self.rootWindow.hidden = YES;
-    SplitCarPlayHostingLog(@"  activateOnDisplay: done, window built (hidden until an app is hosted)");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(self.hostDelay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self hostSlotAtIndex:0 generation:generation];
+        });
 
-    (void)bounds;
+        // Nothing hosted after 12 s: give the CarPlay screen back.
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((12 + self.hostDelay) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (generation != self.sessionGeneration || !self.rootWindow) return;
+            BOOL anyHosted = NO;
+            for (SplitCarPlayCarSlot *slot in self.slots) anyHosted = anyHosted || slot.hosted;
+            if (!anyHosted) {
+                SplitCarPlayHostingLog(@"[car] WATCHDOG: nothing hosted after 12 s");
+                [self teardown];
+            }
+        });
     } @catch (NSException *exception) {
-        SplitCarPlayHostingLog(@"  EXCEPTION in activateOnDisplay:: %@ -- %@\n%@", exception.name, exception.reason, exception.callStackSymbols);
-        [self teardown]; // never leave a half-built window behind
+        SplitCarPlayHostingLog(@"[car]   EXCEPTION in start: %@ -- %@\n%@", exception.name, exception.reason, exception.callStackSymbols);
+        [self teardown];
     }
 }
 
-// Shows the window only if at least one hosted view has a real size.
-- (BOOL)revealIfHosted {
-    if (!self.rootWindow) return NO;
-    BOOL hosted = NO;
-    for (UIView *container in @[self.leftContainer, self.rightContainer]) {
-        if (container.hidden) continue;
-        for (UIView *sub in container.subviews) {
-            if (sub.bounds.size.width > 1 && sub.bounds.size.height > 1) hosted = YES;
-        }
+// For the touch question: what the system gesture manager offers for
+// extra displays on this iOS version. Logged once; nothing is called.
+- (void)logTouchRoutingCandidates {
+    static BOOL logged = NO;
+    if (logged) return;
+    logged = YES;
+    Class manager = objc_getClass("_UISystemGestureManager");
+    NSMutableArray<NSString *> *matches = [NSMutableArray new];
+    for (NSString *line in [SplitCarPlayDescribeMethods(manager) componentsSeparatedByString:@"\n"]) {
+        if ([line rangeOfString:@"isplay" options:NSCaseInsensitiveSearch].location != NSNotFound) [matches addObject:line];
     }
-    if (hosted && self.rootWindow.hidden) {
-        self.rootWindow.hidden = NO;
-        SplitCarPlayHostingLog(@"  revealIfHosted: app view attached -- window shown");
-    }
-    return hosted;
+    SplitCarPlayHostingLog(@"[car]   _UISystemGestureManager=%@ display methods:\n%@", manager, [matches componentsJoinedByString:@"\n"]);
 }
 
-// If nothing got hosted shortly after the window was built, give the
-// CarPlay screen back instead of leaving an invisible-but-present window.
-- (void)startWatchdog {
-    NSUInteger generation = self.sessionGeneration;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-        if (generation != self.sessionGeneration || !self.rootWindow) return; // already torn down
-        if (![self revealIfHosted]) {
-            SplitCarPlayHostingLog(@"WATCHDOG: no app view hosted after 6s -- tearing down");
-            [self teardown];
+- (void)layoutContainers {
+    if (!self.rootWindow) return;
+    CGRect bounds = self.rootWindow.bounds;
+    SplitCarPlayCarSlot *left = self.slots.count > 0 ? self.slots[0] : nil;
+    SplitCarPlayCarSlot *right = self.slots.count > 1 ? self.slots[1] : nil;
+    if (!right) {
+        left.container.frame = bounds;
+        self.dividerView.hidden = YES;
+    } else {
+        CGFloat dividerWidth = 6;
+        CGFloat leftWidth = floor(bounds.size.width * self.splitRatio - dividerWidth / 2.0);
+        CGFloat rightWidth = bounds.size.width - leftWidth - dividerWidth;
+        left.container.frame = CGRectMake(0, 0, leftWidth, bounds.size.height);
+        self.dividerView.frame = CGRectMake(leftWidth, 0, dividerWidth, bounds.size.height);
+        right.container.frame = CGRectMake(leftWidth + dividerWidth, 0, rightWidth, bounds.size.height);
+    }
+    for (SplitCarPlayCarSlot *slot in self.slots) {
+        SCPHostLayoutContent(slot.appViewController.view, slot.container.bounds.size);
+        slot.messageLabel.frame = CGRectInset(slot.container.bounds, 12, 0);
+    }
+}
+
+- (void)handleDividerPan:(UIPanGestureRecognizer *)pan {
+    CGPoint location = [pan locationInView:self.rootWindow];
+    self.splitRatio = MAX(0.2, MIN(0.8, location.x / MAX(1, self.rootWindow.bounds.size.width)));
+    [self layoutContainers]; // views follow right away (scaled)
+    if (pan.state == UIGestureRecognizerStateEnded || pan.state == UIGestureRecognizerStateCancelled) {
+        SplitCarPlayWritePref(@"splitRatio", @(self.splitRatio));
+        for (SplitCarPlayCarSlot *slot in self.slots) {
+            if (slot.hosted && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
+                SCPHostSetSceneForeground(slot.scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
+            }
         }
+    }
+}
+
+- (void)showMessage:(NSString *)message inSlot:(SplitCarPlayCarSlot *)slot {
+    if (!slot.messageLabel) {
+        slot.messageLabel = [[UILabel alloc] init];
+        slot.messageLabel.numberOfLines = 0;
+        slot.messageLabel.textAlignment = NSTextAlignmentCenter;
+        slot.messageLabel.textColor = [UIColor colorWithWhite:0.85 alpha:1];
+        slot.messageLabel.font = [UIFont systemFontOfSize:15];
+        [slot.container addSubview:slot.messageLabel];
+    }
+    slot.messageLabel.text = message;
+    slot.messageLabel.frame = CGRectInset(slot.container.bounds, 12, 0);
+}
+
+#pragma mark Hosting (same steps as the phone preview)
+
+- (void)hostSlotAtIndex:(NSUInteger)index generation:(NSUInteger)generation {
+    if (generation != self.sessionGeneration || index >= self.slots.count) return;
+    SplitCarPlayCarSlot *slot = self.slots[index];
+    if (index > 0) {
+        SplitCarPlayCarSlot *previous = self.slots[index - 1];
+        if (previous.hosted && !SCPHostAppLooksAlive(previous.application, previous.sceneHandle, previous.scene)) {
+            SplitCarPlayHostingLog(@"[car] host[%lu] %@: skipped, the first app is no longer running", (unsigned long)index, slot.bundleID);
+            slot.finished = YES;
+            [self showMessage:@"Không mở app thứ 2: app thứ nhất vừa bị iOS đóng (thiếu RAM)." inSlot:slot];
+            return;
+        }
+    }
+    SplitCarPlayHostingLog(@"[car] host[%lu] %@: launching suspended", (unsigned long)index, slot.bundleID);
+    [self showMessage:@"Đang mở…" inSlot:slot];
+    __weak __typeof__(self) weakSelf = self;
+    SCPHostLaunchSuspended(slot.bundleID, ^(NSError *error) {
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.6 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            __strong __typeof__(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf || generation != strongSelf.sessionGeneration) return;
+            if (error) {
+                slot.finished = YES;
+                [strongSelf showMessage:@"Không khởi động được app này." inSlot:slot];
+            } else {
+                [strongSelf attachSlot:slot];
+            }
+            if (index + 1 < strongSelf.slots.count) {
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                    [weakSelf hostSlotAtIndex:index + 1 generation:generation];
+                });
+            }
+        });
     });
 }
 
+- (void)attachSlot:(SplitCarPlayCarSlot *)slot {
+    @try {
+        NSString *bundleID = slot.bundleID;
+        id application = SCPHostApplication(bundleID);
+        SplitCarPlayHostingLog(@"[car]   attach %@: application=%@", bundleID, application);
+        if (!application) {
+            slot.finished = YES;
+            [self showMessage:@"Không tìm thấy app này." inSlot:slot];
+            return;
+        }
+        slot.application = application;
+        UIViewController *appVC = SCPHostAppViewController(bundleID, application);
+        SplitCarPlayHostingLog(@"[car]   attach %@: appVC=%@", bundleID, appVC);
+        if (!appVC) {
+            slot.finished = YES;
+            [self showMessage:@"Không hiển thị được app này (xem log)." inSlot:slot];
+            return;
+        }
+        SplitCarPlayHostingLog(@"[car]   attach %@: setting live mode", bundleID);
+        if ([appVC respondsToSelector:NSSelectorFromString(@"setIgnoresOcclusions:")]) {
+            ((void (*)(id, SEL, BOOL))objc_msgSend)(appVC, NSSelectorFromString(@"setIgnoresOcclusions:"), YES);
+        }
+        if ([appVC respondsToSelector:NSSelectorFromString(@"setRequestedMode:")]) {
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(appVC, NSSelectorFromString(@"setRequestedMode:"), 2);
+        }
+        UIView *content = appVC.view;
+        content.hidden = NO;
+        [slot.container insertSubview:content atIndex:0]; // moves it out of any earlier window
+        slot.appViewController = appVC;
+        SCPHostLayoutContent(content, slot.container.bounds.size);
+
+        id sceneHandle = [appVC respondsToSelector:NSSelectorFromString(@"sceneHandle")]
+            ? ((id (*)(id, SEL))objc_msgSend)(appVC, NSSelectorFromString(@"sceneHandle")) : nil;
+        id scene = nil;
+        if ([sceneHandle respondsToSelector:NSSelectorFromString(@"sceneIfExists")]) {
+            scene = ((id (*)(id, SEL))objc_msgSend)(sceneHandle, NSSelectorFromString(@"sceneIfExists"));
+        }
+        slot.sceneHandle = sceneHandle;
+        slot.scene = scene;
+        SplitCarPlayHostingLog(@"[car]   attach %@: sceneHandle=%@ scene=%@", bundleID, sceneHandle, scene);
+        SCPHostSetSceneForeground(scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
+
+        slot.hosted = YES;
+        if (self.rootWindow.hidden) {
+            self.rootWindow.hidden = NO;
+            SplitCarPlayHostingLog(@"[car]   window shown");
+        }
+        [self startKeepAlive];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            if (!slot.hosted) return;
+            slot.messageLabel.hidden = YES;
+            SplitCarPlayHostingLog(@"[car]   attach %@: after 1.5 s bounds=%@ scale=%.2f window=%@",
+                                    bundleID, NSStringFromCGRect(content.bounds), content.transform.a, content.window);
+        });
+    } @catch (NSException *exception) {
+        SplitCarPlayHostingLog(@"[car]   attach %@ EXCEPTION %@ -- %@\n%@", slot.bundleID, exception.name, exception.reason, exception.callStackSymbols);
+        slot.finished = YES;
+    }
+}
+
+- (void)startKeepAlive {
+    if (self.keepAliveTimer) return;
+    __weak __typeof__(self) weakSelf = self;
+    self.keepAliveTimer = [NSTimer scheduledTimerWithTimeInterval:1.5 repeats:YES block:^(NSTimer *timer) {
+        __strong __typeof__(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf) { [timer invalidate]; return; }
+        [strongSelf keepAliveTick];
+    }];
+}
+
+- (void)keepAliveTick {
+    @try {
+        for (SplitCarPlayCarSlot *slot in [self.slots copy]) {
+            if (!slot.hosted) continue;
+            if (!slot.scene && [slot.sceneHandle respondsToSelector:NSSelectorFromString(@"sceneIfExists")]) {
+                slot.scene = ((id (*)(id, SEL))objc_msgSend)(slot.sceneHandle, NSSelectorFromString(@"sceneIfExists"));
+                if (!slot.scene) continue;
+                SplitCarPlayHostingLog(@"[car]   keepAlive %@: scene appeared", slot.bundleID);
+            }
+            if (!SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
+                if (++slot.deadStrikes >= 2) [self dropSlot:slot message:@"App đã bị iOS đóng (có thể do thiếu RAM)."];
+                continue;
+            }
+            slot.deadStrikes = 0;
+            id settings = [slot.scene respondsToSelector:NSSelectorFromString(@"settings")]
+                ? ((id (*)(id, SEL))objc_msgSend)(slot.scene, NSSelectorFromString(@"settings")) : nil;
+            BOOL foreground = [settings respondsToSelector:NSSelectorFromString(@"isForeground")]
+                ? ((BOOL (*)(id, SEL))objc_msgSend)(settings, NSSelectorFromString(@"isForeground")) : YES;
+            if (foreground) {
+                slot.reassertStreak = 0;
+                continue;
+            }
+            slot.reassertCount++;
+            if (++slot.reassertStreak > 20) {
+                [self dropSlot:slot message:@"iOS không cho app này chạy trên màn hình xe."];
+                continue;
+            }
+            if (slot.reassertCount <= 5 || slot.reassertCount % 20 == 0) {
+                SplitCarPlayHostingLog(@"[car]   keepAlive %@: scene went background, re-asserting (#%ld)", slot.bundleID, (long)slot.reassertCount);
+            }
+            SCPHostSetSceneForeground(slot.scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
+        }
+    } @catch (NSException *exception) {
+        SplitCarPlayHostingLog(@"[car]   keepAlive EXCEPTION %@ -- %@", exception.name, exception.reason);
+    }
+    BOOL anyLeft = NO;
+    for (SplitCarPlayCarSlot *slot in self.slots) anyLeft = anyLeft || slot.hosted || !slot.finished;
+    if (self.rootWindow && self.slots.count && !anyLeft) {
+        SplitCarPlayHostingLog(@"[car] no app left running");
+        [self teardown];
+    }
+}
+
+// The app is gone: hide its view, don't touch its scene, never free it.
+- (void)dropSlot:(SplitCarPlayCarSlot *)slot message:(NSString *)message {
+    SplitCarPlayHostingLog(@"[car]   drop %@: %@", slot.bundleID, message);
+    slot.hosted = NO;
+    slot.finished = YES;
+    slot.appViewController.view.hidden = YES;
+    SCPHostForgetAppViewController(slot.bundleID, slot.appViewController);
+    slot.appViewController = nil;
+    slot.scene = nil;
+    slot.sceneHandle = nil;
+    slot.messageLabel.hidden = NO;
+    [self showMessage:message inSlot:slot];
+}
+
 - (void)closeFromCar {
-    SplitCarPlayHostingLog(@"closed from the car screen (✕ / two-finger long press)");
+    SplitCarPlayHostingLog(@"[car] closed from the car screen (✕ / two-finger long press)");
     [self teardown];
 }
 
@@ -983,21 +1193,83 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     if (gesture.state == UIGestureRecognizerStateBegan) [self closeFromCar];
 }
 
+#pragma mark Teardown (one app at a time, nothing freed)
+
+- (void)dropWindowNow {
+    self.rootWindow.hidden = YES;
+    SCPHostKeepForever(self.rootWindow);
+    self.rootWindow = nil;
+}
+
 - (void)teardown {
     self.sessionGeneration++;
-    // Unconditional: also clears a flag left at 1 by a SpringBoard crash
-    // mid-session (notify state outlives the process).
-    SCPSetHostingSessionActive(NO);
-    self.hostingSessionActive = NO;
-    [self.rootWindow removeFromSuperview];
-    self.rootWindow.hidden = YES;
-    self.rootWindow = nil;
-    self.leftAppVC = nil;
-    self.rightAppVC = nil;
-    self.speedBubble = nil;
-    self.carCloseButton = nil;
+    [self.keepAliveTimer invalidate];
+    self.keepAliveTimer = nil;
     [self.speedBubbleStaleTimer invalidate];
     self.speedBubbleStaleTimer = nil;
+    self.hostingSessionActive = NO;
+    if (self.tearingDown) return;
+    if (!self.rootWindow) {
+        SCPSetHostingSessionActive(NO); // also clears a flag left by a crash mid-session
+        SCPHostSetCarPlaySessionActive(NO);
+        return;
+    }
+    SplitCarPlayHostingLog(@"[car] stop");
+    self.tearingDown = YES;
+    NSArray<SplitCarPlayCarSlot *> *slots = [self.slots copy] ?: @[];
+    self.slots = nil;
+    UIWindow *window = self.rootWindow;
+    self.rootWindow = nil;
+    self.speedBubble = nil;
+    self.carCloseButton = nil;
+    self.dividerView = nil;
+    window.hidden = YES; // the normal CarPlay UI is back right away
+    SCPHostKeepForever(window);
+    [self releaseSlots:slots index:0];
+}
+
+- (void)releaseSlots:(NSArray<SplitCarPlayCarSlot *> *)slots index:(NSUInteger)index {
+    if (index >= slots.count) {
+        self.tearingDown = NO;
+        SCPSetHostingSessionActive(NO);
+        SCPHostSetCarPlaySessionActive(NO);
+        SplitCarPlayHostingLog(@"[car] stop: done");
+        return;
+    }
+    SplitCarPlayCarSlot *slot = slots[index];
+    BOOL alive = NO;
+    @try {
+        alive = slot.hosted && slot.appViewController && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene);
+        if (alive && [slot.appViewController respondsToSelector:NSSelectorFromString(@"setRequestedMode:")]) {
+            SplitCarPlayHostingLog(@"[car]   stop %@: setRequestedMode:0", slot.bundleID);
+            ((void (*)(id, SEL, NSInteger))objc_msgSend)(slot.appViewController, NSSelectorFromString(@"setRequestedMode:"), 0);
+            SplitCarPlayHostingLog(@"[car]   stop %@: setRequestedMode:0 done", slot.bundleID);
+        }
+    } @catch (NSException *exception) {
+        SplitCarPlayHostingLog(@"[car]   stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
+    }
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.1) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        @try {
+            if (alive && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
+                id settings = [slot.scene respondsToSelector:NSSelectorFromString(@"settings")]
+                    ? ((id (*)(id, SEL))objc_msgSend)(slot.scene, NSSelectorFromString(@"settings")) : nil;
+                BOOL foreground = [settings respondsToSelector:NSSelectorFromString(@"isForeground")]
+                    && ((BOOL (*)(id, SEL))objc_msgSend)(settings, NSSelectorFromString(@"isForeground"));
+                if (foreground) {
+                    SplitCarPlayHostingLog(@"[car]   stop %@: backgrounding", slot.bundleID);
+                    SCPHostSetSceneForeground(slot.scene, NO, [UIScreen mainScreen].bounds.size);
+                }
+            }
+        } @catch (NSException *exception) {
+            SplitCarPlayHostingLog(@"[car]   stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
+        }
+        slot.appViewController = nil; // still kept by the hosting core
+        slot.scene = nil;
+        slot.sceneHandle = nil;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self releaseSlots:slots index:index + 1];
+        });
+    });
 }
 
 #pragma mark Speed bubble (data comes from VietmapLiveHook.xm, same dylib)
@@ -1012,13 +1284,13 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     NSDictionary *state = fileState;
     if ([notifyState[@"timestamp"] doubleValue] > [fileState[@"timestamp"] doubleValue]) state = notifyState;
     [self.speedBubble applyState:state ?: @{}]; // empty state renders as "disconnected"
-    [self.speedBubble tick]; // date/battery/now-playing text — see SpeedBubbleView.tick's own comment
+    [self.speedBubble tick];
 
     BOOL overLimit = [state[@"isOverLimit"] boolValue];
     if (self.speedAudioAlertEnabled && overLimit) {
         NSTimeInterval sinceLastAlert = self.lastSpeedAudioAlertAt ? -[self.lastSpeedAudioAlertAt timeIntervalSinceNow] : INFINITY;
         if (sinceLastAlert > 8.0) {
-            AudioServicesPlaySystemSound(1057); // "Tink" — a real, standard SystemSoundID; just an alert tone, nothing fancy
+            AudioServicesPlaySystemSound(1057); // "Tink"
             self.lastSpeedAudioAlertAt = [NSDate date];
         }
     } else if (!overLimit) {
@@ -1039,207 +1311,6 @@ static UIImage *SplitCarPlayBatteryIcon(CGFloat level) {
     } else if (!self.speedBubble.showNowPlaying) {
         [self.speedBubble applyNowPlayingText:nil];
     }
-}
-
-- (void)layoutContainers {
-    if (!self.rootWindow || !self.leftContainer || !self.rightContainer) return;
-    CGRect bounds = self.rootWindow.bounds;
-    if (self.singleAppMode) {
-        self.leftContainer.frame = bounds;
-    } else {
-        CGFloat dividerWidth = 6;
-        CGFloat leftWidth = floor(bounds.size.width * self.splitRatio - dividerWidth / 2.0);
-        CGFloat rightWidth = bounds.size.width - leftWidth - dividerWidth;
-
-        self.leftContainer.frame = CGRectMake(0, 0, leftWidth, bounds.size.height);
-        self.dividerView.frame = CGRectMake(leftWidth, 0, dividerWidth, bounds.size.height);
-        self.rightContainer.frame = CGRectMake(leftWidth + dividerWidth, 0, rightWidth, bounds.size.height);
-    }
-
-    // Hosted app views are laid out full-size inside their own container and
-    // CLIPPED by clipsToBounds — this is simpler and more robust than
-    // scaling (CGAffineTransformMakeScale) the way the single-app original
-    // does for orientation changes. If you'd rather scale the *entire* app
-    // UI down to fit (so nothing is cropped), apply a scale transform to
-    // appVC.view here instead, matching the original's
-    // resizeAppViewForOrientation:fullscreen:forceUpdate: pattern.
-    //
-    // Resize whatever hostApp: actually added (appView, not appVC.view).
-    for (UIView *container in @[self.leftContainer, self.rightContainer]) {
-        for (UIView *sub in container.subviews) sub.frame = container.bounds;
-    }
-}
-
-- (void)handleDividerPan:(UIPanGestureRecognizer *)pan {
-    CGPoint location = [pan locationInView:self.rootWindow];
-    CGFloat newRatio = location.x / self.rootWindow.bounds.size.width;
-    newRatio = MAX(0.2, MIN(0.8, newRatio));
-    self.splitRatio = newRatio;
-    [self layoutContainers];
-}
-
-#pragma mark App hosting — now grounded in real selector strings pulled
-#pragma mark from SidePlay2.dylib; see the class forward-declarations
-#pragma mark above for exactly what's VERIFIED vs still ADAPT.
-
-// `slot` takes the address of a strong ivar (e.g. &_leftAppVC). Declaring it
-// explicitly `__strong` (rather than the implicit `__autoreleasing` ARC
-// gives bare `Type **` parameters) avoids ARC's by-reference write-back
-// requirement, which rejects taking the address of an ivar directly.
-- (void)hostApp:(NSString *)bundleID inContainer:(UIView *)container replacingExisting:(UIViewController * __strong *)slot {
-    if (bundleID.length == 0) return;
-    // NOTE: a real implementation should check whether *slot is already
-    // hosting this exact bundleID (and bail out early) before re-creating
-    // the scene below — omitted here for brevity.
-
-    SplitCarPlayHostingLog(@"hostApp: begin for %@", bundleID);
-
-    // Wraps the whole ADAPT chain below: if any guessed selector's real
-    // argument/return shape is wrong, calling it on an object that
-    // doesn't actually respond would normally raise an uncaught
-    // NSException and crash/respawn CarPlayApp -- which, with no visible
-    // crash UI on a car's screen, could look identical to "just blank"
-    // to whoever's driving. Catching it here guarantees a log entry
-    // explaining what actually happened, and a plain failed hostApp:
-    // call instead of a process respawn.
-    @try {
-        Class appControllerClass = objc_getClass("SBApplicationController");
-        Class entityClass = objc_getClass("SBDeviceApplicationSceneEntity");
-        Class appViewControllerClass = objc_getClass("SBAppViewController");
-        SplitCarPlayHostingLog(@"  classes resolved: controller=%@ entity=%@ appVC=%@",
-                                appControllerClass, entityClass, appViewControllerClass);
-        if (!appControllerClass || !entityClass || !appViewControllerClass) {
-            SplitCarPlayHostingLog(@"  ABORT: missing a required private class — adjust names for this iOS version");
-            return;
-        }
-
-        id appController = [appControllerClass respondsToSelector:@selector(sharedInstance)] ? [appControllerClass sharedInstance] : nil;
-        SplitCarPlayHostingLog(@"  SBApplicationController sharedInstance = %@", appController);
-        if (!appController) {
-            SplitCarPlayHostingLog(@"  ABORT: SBApplicationController has no +sharedInstance on this iOS version");
-            return;
-        }
-
-        id application = [appController respondsToSelector:@selector(applicationWithBundleIdentifier:)]
-            ? [appController applicationWithBundleIdentifier:bundleID] : nil;
-        SplitCarPlayHostingLog(@"  applicationWithBundleIdentifier:%@ = %@", bundleID, application);
-        if (!application) {
-            SplitCarPlayHostingLog(@"  ABORT: could not resolve application object for %@", bundleID);
-            return;
-        }
-
-        id displaySceneManager = [self displaySceneManagerForCurrentDisplay];
-        SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay = %@", displaySceneManager);
-        if (!displaySceneManager) {
-            SplitCarPlayHostingLog(@"  ABORT: no scene manager for this display (SBSceneManagerCoordinator missing or mainDisplaySceneManager unavailable)");
-            return;
-        }
-
-        if (![displaySceneManager respondsToSelector:@selector(_sceneIdentityForApplication:createPrimaryIfRequired:)]) {
-            SplitCarPlayHostingLog(@"  ABORT: displaySceneManager does not respond to _sceneIdentityForApplication:createPrimaryIfRequired: (class is %@)", [displaySceneManager class]);
-            return;
-        }
-        id sceneIdentity = [displaySceneManager _sceneIdentityForApplication:application
-                                                          createPrimaryIfRequired:YES];
-        SplitCarPlayHostingLog(@"  sceneIdentity = %@", sceneIdentity);
-
-        // Still ADAPT: SBApplicationSceneHandleRequest's real construction API
-        // (see forward-declaration comment above). Try the known candidate
-        // shapes in order; on failure, dump the class's real method list to
-        // the log so the next build can use the right one.
-        Class requestClass = objc_getClass("SBApplicationSceneHandleRequest");
-        if (!requestClass) {
-            SplitCarPlayHostingLog(@"  ABORT: SBApplicationSceneHandleRequest class not found");
-            return;
-        }
-        id request = nil;
-        SEL twoArg = @selector(requestForApplication:sceneIdentity:);
-        SEL threeArg = NSSelectorFromString(@"defaultRequestForApplication:sceneIdentity:displayIdentity:");
-        if ([requestClass respondsToSelector:twoArg]) {
-            request = [requestClass requestForApplication:application sceneIdentity:sceneIdentity];
-            SplitCarPlayHostingLog(@"  request via requestForApplication:sceneIdentity: = %@", request);
-        } else if ([requestClass respondsToSelector:threeArg]) {
-            id displayIdentity = [displaySceneManager respondsToSelector:NSSelectorFromString(@"displayIdentity")]
-                ? [displaySceneManager valueForKey:@"displayIdentity"] : nil;
-            request = ((id (*)(id, SEL, id, id, id))objc_msgSend)(requestClass, threeArg, application, sceneIdentity, displayIdentity);
-            SplitCarPlayHostingLog(@"  request via defaultRequestForApplication:sceneIdentity:displayIdentity: (displayIdentity=%@) = %@", displayIdentity, request);
-        }
-        if (!request) {
-            SplitCarPlayHostingLog(@"  ABORT: no known constructor on SBApplicationSceneHandleRequest. Its methods on this iOS version:\n%@",
-                                    SplitCarPlayDescribeMethods(requestClass));
-            return;
-        }
-
-        if (![displaySceneManager respondsToSelector:@selector(fetchOrCreateApplicationSceneHandleForRequest:)]) {
-            SplitCarPlayHostingLog(@"  ABORT: displaySceneManager does not respond to fetchOrCreateApplicationSceneHandleForRequest:");
-            return;
-        }
-        id sceneHandle = [displaySceneManager fetchOrCreateApplicationSceneHandleForRequest:request];
-        SplitCarPlayHostingLog(@"  sceneHandle = %@", sceneHandle);
-        if (!sceneHandle) {
-            SplitCarPlayHostingLog(@"  ABORT: failed to fetch/create scene handle for %@", bundleID);
-            return;
-        }
-
-        id sceneEntity = [[entityClass alloc] initWithApplicationSceneHandle:sceneHandle];
-        SplitCarPlayHostingLog(@"  sceneEntity = %@", sceneEntity);
-        if (![appViewControllerClass instancesRespondToSelector:@selector(initWithIdentifier:andApplicationSceneEntity:)]) {
-            SplitCarPlayHostingLog(@"  ABORT: SBAppViewController has no initWithIdentifier:andApplicationSceneEntity:. Its methods:\n%@",
-                                    SplitCarPlayDescribeMethods(appViewControllerClass));
-            return;
-        }
-        SBAppViewController *appVC = [[appViewControllerClass alloc] initWithIdentifier:bundleID
-                                                               andApplicationSceneEntity:sceneEntity];
-        SplitCarPlayHostingLog(@"  appVC = %@", appVC);
-        if (!appVC) {
-            SplitCarPlayHostingLog(@"  ABORT: SBAppViewController init returned nil");
-            return;
-        }
-
-        // Prefer the real content view (appView) over the inherited
-        // UIViewController.view -- see the VERIFIED note on the forward
-        // declaration above. Falls back to .view if appView isn't actually
-        // there on this iOS version.
-        BOOL hasAppView = [appVC respondsToSelector:@selector(appView)];
-        UIView *contentView = hasAppView ? appVC.appView : appVC.view;
-        SplitCarPlayHostingLog(@"  hasAppView=%d contentView=%@ bounds=%@", hasAppView, contentView, NSStringFromCGRect(contentView.bounds));
-
-        // Clear out whatever was hosted here before (that was appView, not
-        // the old appVC.view, so remove the container's subviews directly).
-        for (UIView *old in [container.subviews copy]) [old removeFromSuperview];
-        *slot = appVC;
-        contentView.frame = container.bounds;
-        [container addSubview:contentView];
-
-        // Both ADAPT (selector names are real, but which object answers them
-        // and exactly what's needed to make a hosted scene actually render/
-        // receive touches isn't independently confirmed) -- guarded so a wrong
-        // guess just skips the call instead of crashing.
-        BOOL hasSetForeground = [appVC respondsToSelector:@selector(setForeground:)];
-        if (hasSetForeground) [appVC setForeground:YES];
-        BOOL hasUpdateReferenceSize = [appVC respondsToSelector:@selector(_updateReferenceSize:andOrientation:)];
-        if (hasUpdateReferenceSize) [appVC _updateReferenceSize:container.bounds.size andOrientation:0];
-        SplitCarPlayHostingLog(@"  hostApp: done for %@ (setForeground=%d updateReferenceSize=%d)", bundleID, hasSetForeground, hasUpdateReferenceSize);
-    } @catch (NSException *exception) {
-        SplitCarPlayHostingLog(@"  EXCEPTION for %@: %@ -- %@\n%@", bundleID, exception.name, exception.reason, exception.callStackSymbols);
-    }
-}
-
-- (id)displaySceneManagerForCurrentDisplay {
-    // VERIFIED class/selector ("+SBSceneManagerCoordinator
-    // mainDisplaySceneManager" is a real string in SidePlay2.dylib) -- see
-    // the forward-declaration comment above for the one remaining
-    // uncertainty (whether "main" scopes correctly to the CarPlay display
-    // from inside this process).
-    Class coordinatorClass = objc_getClass("SBSceneManagerCoordinator");
-    SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: coordinatorClass=%@", coordinatorClass);
-    if (![coordinatorClass respondsToSelector:@selector(mainDisplaySceneManager)]) {
-        SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: ABORT -- doesn't respond to +mainDisplaySceneManager");
-        return nil;
-    }
-    id manager = [coordinatorClass mainDisplaySceneManager];
-    SplitCarPlayHostingLog(@"  displaySceneManagerForCurrentDisplay: mainDisplaySceneManager = %@ (class %@)", manager, [manager class]);
-    return manager;
 }
 
 @end

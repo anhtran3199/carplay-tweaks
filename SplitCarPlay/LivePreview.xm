@@ -33,6 +33,7 @@
 #import <objc/runtime.h>
 #import <objc/message.h>
 #import "SplitCarPlayShared.h"
+#import "SCPHosting.h"
 
 #pragma mark - Logging
 
@@ -207,6 +208,10 @@ static void SCPLiveKeepForever(id object) {
 - (void)start;
 - (void)stopWithState:(uint64_t)state reason:(NSString *)reason;
 - (void)applyResizeFromApp;
+// Shared with the CarPlay window through SCPHosting.h.
+- (void)launchSuspended:(NSString *)bundleID completion:(void (^)(NSError *))completion;
+- (UIViewController *)makeAppViewControllerForSlot:(SCPLiveSlot *)slot application:(id)application;
+- (BOOL)slotLooksAlive:(SCPLiveSlot *)slot;
 @end
 
 @implementation SCPLivePreviewController {
@@ -231,6 +236,12 @@ static void SCPLiveKeepForever(id object) {
 }
 
 - (void)start {
+    if (SCPHostIsCarPlaySessionActive()) {
+        // The apps are on the car screen; their views can't be in two places.
+        SCPLiveLog(@"start: ignored, a CarPlay session is running");
+        SCPSetLiveState(SCPLiveStateIdle);
+        return;
+    }
     if (_tearingDown) {
         SCPLiveLog(@"start: previous session still closing, starting after it");
         _pendingStart = YES;
@@ -984,6 +995,99 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
 }
 
 @end
+
+#pragma mark - Hosting core for the CarPlay window (SCPHosting.h)
+
+static BOOL gSCPCarPlaySessionActive = NO;
+
+BOOL SCPHostSetCarPlaySessionActive(BOOL active) {
+    gSCPCarPlaySessionActive = active;
+    if (!active) return NO;
+    uint64_t state = SCPGetLiveState();
+    BOOL wasRunning = state == SCPLiveStateStarting || state == SCPLiveStateRunning;
+    [[SCPLivePreviewController sharedInstance] stopWithState:SCPLiveStateIdle reason:@"CarPlay session starting"];
+    return wasRunning;
+}
+
+BOOL SCPHostIsCarPlaySessionActive(void) {
+    return gSCPCarPlaySessionActive;
+}
+
+void SCPHostLaunchSuspended(NSString *bundleID, void (^completion)(NSError *error)) {
+    [[SCPLivePreviewController sharedInstance] launchSuspended:bundleID completion:completion];
+}
+
+id SCPHostApplication(NSString *bundleID) {
+    if (bundleID.length == 0) return nil;
+    id appController = SCPSendId(objc_getClass("SBApplicationController"), @"sharedInstance");
+    return SCPSendIdId(appController, @"applicationWithBundleIdentifier:", bundleID);
+}
+
+UIViewController *SCPHostAppViewController(NSString *bundleID, id application) {
+    if (bundleID.length == 0 || !application) return nil;
+    UIViewController *controller = SCPLiveReusableControllers()[bundleID];
+    if (controller) return controller;
+    @try {
+        SCPLiveSlot *slot = [SCPLiveSlot new];
+        slot.bundleID = bundleID;
+        controller = [[SCPLivePreviewController sharedInstance] makeAppViewControllerForSlot:slot application:application];
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"host core: EXCEPTION making view controller for %@: %@ -- %@", bundleID, exception.name, exception.reason);
+        controller = nil;
+    }
+    if (controller) {
+        SCPLiveKeepForever(controller);
+        SCPLiveReusableControllers()[bundleID] = controller;
+    }
+    return controller;
+}
+
+void SCPHostForgetAppViewController(NSString *bundleID, UIViewController *controller) {
+    if (bundleID.length && SCPLiveReusableControllers()[bundleID] == controller) {
+        [SCPLiveReusableControllers() removeObjectForKey:bundleID];
+    }
+}
+
+BOOL SCPHostAppLooksAlive(id application, id sceneHandle, id scene) {
+    SCPLiveSlot *slot = [SCPLiveSlot new];
+    slot.application = application;
+    slot.sceneHandle = sceneHandle;
+    slot.scene = scene;
+    return [[SCPLivePreviewController sharedInstance] slotLooksAlive:slot];
+}
+
+void SCPHostSetSceneForeground(id scene, BOOL foreground, CGSize size) {
+    SEL updateSel = NSSelectorFromString(@"updateSettingsWithBlock:");
+    if (!scene || ![scene respondsToSelector:updateSel]) return;
+    void (^block)(id) = ^(id settings) {
+        SCPSendBool(settings, @"setForeground:", foreground);
+        SCPSendRect(settings, @"setFrame:", CGRectMake(0, 0, size.width, size.height));
+    };
+    @try {
+        ((void (*)(id, SEL, id))objc_msgSend)(scene, updateSel, block);
+    } @catch (NSException *exception) {
+        SCPLiveLog(@"host core: setForeground EXCEPTION %@ -- %@", exception.name, exception.reason);
+    }
+}
+
+CGSize SCPHostVirtualSize(CGSize pane) {
+    return SCPLiveVirtualSize(pane);
+}
+
+void SCPHostLayoutContent(UIView *content, CGSize pane) {
+    if (!content) return;
+    CGSize virtualSize = SCPLiveVirtualSize(pane);
+    CGFloat scale = virtualSize.width > 0 ? pane.width / virtualSize.width : 1.0;
+    content.autoresizingMask = UIViewAutoresizingNone;
+    content.transform = CGAffineTransformIdentity;
+    content.bounds = CGRectMake(0, 0, virtualSize.width, virtualSize.height);
+    content.center = CGPointMake(pane.width / 2.0, pane.height / 2.0);
+    content.transform = CGAffineTransformMakeScale(scale, scale);
+}
+
+void SCPHostKeepForever(id object) {
+    SCPLiveKeepForever(object);
+}
 
 #pragma mark - Entry point
 
