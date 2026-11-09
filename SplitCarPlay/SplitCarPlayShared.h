@@ -18,6 +18,8 @@
 #define SCP_PREFS_DOMAIN CFSTR("com.example.splitcarplay")
 #define SCP_PREFS_PATH @"/var/mobile/Library/Preferences/com.example.splitcarplay.plist"
 #define SCP_RELOAD_NOTIFICATION "com.example.splitcarplay/reload"
+// App -> SpringBoard: restart SpringBoard (Trang chủ "Khởi động lại SpringBoard").
+#define SCP_RESPRING_NOTIFICATION "com.example.splitcarplay/respring"
 
 static inline NSDictionary *SCPDefaultPrefs(void) {
     return @{

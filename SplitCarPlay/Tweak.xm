@@ -1697,6 +1697,40 @@ static void SplitCarPlayRestoreBrightness(void) {
 
         SplitCarPlayLoadMediaRemote();
 
+        // "Khởi động lại SpringBoard" from the app. Clear the crash markers
+        // first (a requested restart isn't a crash), put the brightness back,
+        // then relaunch SpringBoard the way SpringBoard itself does
+        // (SBSRelaunchAction through FBSSystemService), falling back to a
+        // plain exit, which launchd restarts.
+        CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL,
+            (CFNotificationCallback)[](CFNotificationCenterRef center, void *observer, CFStringRef name,
+                                        const void *object, CFDictionaryRef userInfo) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    SplitCarPlayHostingLog(@"[car] respring requested by the app");
+                    SCPSetPref(@"carPlaySessionActive", @NO);
+                    SCPSetPref(@"livePreviewSessionActive", @NO);
+                    SplitCarPlayRestoreBrightness();
+                    @try {
+                        Class actionClass = objc_getClass("SBSRelaunchAction");
+                        SEL make = NSSelectorFromString(@"actionWithReason:options:targetURL:");
+                        id service = [objc_getClass("FBSSystemService") respondsToSelector:NSSelectorFromString(@"sharedService")]
+                            ? ((id (*)(id, SEL))objc_msgSend)(objc_getClass("FBSSystemService"), NSSelectorFromString(@"sharedService")) : nil;
+                        SEL send = NSSelectorFromString(@"sendActions:withResult:");
+                        if ([actionClass respondsToSelector:make] && [service respondsToSelector:send]) {
+                            id action = ((id (*)(id, SEL, id, NSUInteger, id))objc_msgSend)(actionClass, make, @"SplitCarPlay", (NSUInteger)4 /* fade to black */, nil);
+                            if (action) {
+                                ((void (*)(id, SEL, id, id))objc_msgSend)(service, send, [NSSet setWithObject:action], nil);
+                                return;
+                            }
+                        }
+                    } @catch (NSException *exception) {
+                        SplitCarPlayHostingLog(@"[car] respring action EXCEPTION %@ -- %@", exception.name, exception.reason);
+                    }
+                    exit(0);
+                });
+            },
+            CFSTR(SCP_RESPRING_NOTIFICATION), NULL, CFNotificationSuspensionBehaviorDeliverImmediately);
+
         static dispatch_source_t carMemorySource;
         carMemorySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
                                                  DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,

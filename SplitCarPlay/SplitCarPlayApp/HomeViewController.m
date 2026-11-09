@@ -150,6 +150,8 @@ static void SCPHomePop(CALayer *layer, NSArray<NSNumber *> *values, CFTimeInterv
     UIImageView *_rightIcon;
     UILabel *_appsLabel;
 
+    UIButton *_respringButton; // "Khởi động lại SpringBoard"
+
     // Status card motion (see "Status card motion" below)
     UIView *_miniSplit;      // two panes + divider inside the car while showing
     UIView *_miniLeft;
@@ -328,6 +330,18 @@ static void SCPHomePop(CALayer *layer, NSArray<NSNumber *> *values, CFTimeInterv
     chevron.userInteractionEnabled = NO;
     [_appsRow addSubview:chevron];
 
+    // Respring: for when the car screen or the live preview gets stuck.
+    _respringButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    UIImageSymbolConfiguration *respringConfig = [UIImageSymbolConfiguration configurationWithPointSize:15 weight:UIImageSymbolWeightSemibold];
+    [_respringButton setImage:[UIImage systemImageNamed:@"arrow.clockwise.circle.fill" withConfiguration:respringConfig] forState:UIControlStateNormal];
+    [_respringButton setTitle:@"  Khởi động lại SpringBoard" forState:UIControlStateNormal];
+    _respringButton.titleLabel.font = [UIFont systemFontOfSize:15 weight:UIFontWeightSemibold];
+    _respringButton.tintColor = [UIColor systemRedColor];
+    _respringButton.backgroundColor = [UIColor secondarySystemGroupedBackgroundColor];
+    _respringButton.layer.cornerRadius = 12;
+    [_respringButton addTarget:self action:@selector(confirmRespring) forControlEvents:UIControlEventTouchUpInside];
+    [_scroll addSubview:_respringButton];
+
     // Loops are restarted if Reduce Motion changes, or after coming back
     // from the background (iOS may drop running layer animations there).
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(startCardAnimations)
@@ -367,6 +381,17 @@ static void SCPHomePop(CALayer *layer, NSArray<NSNumber *> *values, CFTimeInterv
     }
     SplitCarPlaySetPref(@"carPlayAutoHost", @(sender.on));
     [self refresh];
+}
+
+- (void)confirmRespring {
+    UIAlertController *alert = [UIAlertController alertControllerWithTitle:@"Khởi động lại SpringBoard?"
+                                                                   message:@"Màn hình sẽ tắt vài giây rồi về màn hình khoá. Dùng khi màn hình xe hoặc Mô phỏng bị kẹt."
+                                                            preferredStyle:UIAlertControllerStyleAlert];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Huỷ" style:UIAlertActionStyleCancel handler:nil]];
+    [alert addAction:[UIAlertAction actionWithTitle:@"Khởi động lại" style:UIAlertActionStyleDestructive handler:^(UIAlertAction *action) {
+        notify_post(SCP_RESPRING_NOTIFICATION); // handled by Tweak.xm in SpringBoard
+    }]];
+    [self presentViewController:alert animated:YES completion:nil];
 }
 
 - (void)openQuickOpen {
@@ -800,7 +825,10 @@ static void SCPHomePop(CALayer *layer, NSArray<NSNumber *> *values, CFTimeInterv
     _appsLabel.frame = CGRectMake(labelX, 0, w - labelX - 34, 52);
     [_appsRow viewWithTag:103].frame = CGRectMake(w - 30, 0, 16, 52);
     _statusCard.frame = CGRectMake(x, y, w, CGRectGetMaxY(_appsRow.frame));
-    y = CGRectGetMaxY(_statusCard.frame) + 24;
+    y = CGRectGetMaxY(_statusCard.frame) + 16;
+
+    _respringButton.frame = CGRectMake(x, y, w, 48);
+    y = CGRectGetMaxY(_respringButton.frame) + 24;
 
     _scroll.contentSize = CGSizeMake(self.view.bounds.size.width, y);
     [self refreshStatus]; // dot colors for the freshly made dots
