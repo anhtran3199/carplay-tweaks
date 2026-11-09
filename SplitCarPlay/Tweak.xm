@@ -789,6 +789,7 @@ static void SplitCarPlayRestoreBrightness(void) {
 - (void)teardown;
 - (void)reloadFromPreferences;
 - (void)refreshSpeedBubble;
+- (void)handleMemoryPressure:(BOOL)critical;
 @end
 
 @implementation SplitCarPlayController
@@ -1476,6 +1477,29 @@ static void SplitCarPlayRestoreBrightness(void) {
     [self reloadAppBarIcons];
 }
 
+#pragma mark Memory pressure
+
+// On the car the map matters most: drop the second app, keep the first.
+- (void)handleMemoryPressure:(BOOL)critical {
+    SplitCarPlayHostingLog(@"[mem] car pressure %@ %@", critical ? @"CRITICAL" : @"WARN", SCPMemLine());
+    if (!self.rootWindow || self.tearingDown || self.slots.count < 2) return;
+    SplitCarPlayCarSlot *second = self.slots[1];
+    [second.messageLabel removeFromSuperview];
+    [self retireSlot:second];
+    second.container.hidden = YES; // hidden, not removed: it still holds the app's view
+    [self.slots removeObjectAtIndex:1];
+    self.singleAppMode = YES;
+    self.dividerView.hidden = YES;
+    [self layoutContainers];
+    for (SplitCarPlayCarSlot *slot in self.slots) {
+        if (slot.hosted && SCPHostAppLooksAlive(slot.application, slot.sceneHandle, slot.scene)) {
+            SCPHostSetSceneForeground(slot.scene, YES, SCPHostVirtualSize(slot.container.bounds.size));
+        }
+    }
+    [self reloadAppBarIcons];
+    SplitCarPlayHostingLog(@"[car] memory: dropped %@, now one app", second.bundleID);
+}
+
 #pragma mark Tự làm tối màn hình
 
 - (void)scheduleAutoDim {
@@ -1672,6 +1696,16 @@ static void SplitCarPlayRestoreBrightness(void) {
         }
 
         SplitCarPlayLoadMediaRemote();
+
+        static dispatch_source_t carMemorySource;
+        carMemorySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+                                                 DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                                                 dispatch_get_main_queue());
+        dispatch_source_set_event_handler(carMemorySource, ^{
+            BOOL critical = (dispatch_source_get_data(carMemorySource) & DISPATCH_MEMORYPRESSURE_CRITICAL) != 0;
+            [[SplitCarPlayController sharedInstance] handleMemoryPressure:critical];
+        });
+        dispatch_resume(carMemorySource);
 
         // SpringBoard died during a CarPlay session: switch "Đang bật" off
         // so the same thing can't crash it on every connect, and tell the

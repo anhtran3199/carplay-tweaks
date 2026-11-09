@@ -1056,7 +1056,11 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         SCPLiveLog(@"  stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
     }
 
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.1) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+    // Short gaps (0.9.3): the long ones (~1.2 s per app) left the apps
+    // foreground while the app switcher snapshotted everything, and the
+    // phone ran out of memory. The 0.7.x crash they were meant for was
+    // freeing the view controllers, which no longer happens.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.15 : 0.0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         @try {
             if (alive && slot.scene && [self slotLooksAlive:slot]) {
                 BOOL foreground = SCPGetBool(SCPSendId(slot.scene, @"settings"), @"isForeground", NO);
@@ -1069,7 +1073,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         } @catch (NSException *exception) {
             SCPLiveLog(@"  stop %@ EXCEPTION %@ -- %@", slot.bundleID, exception.name, exception.reason);
         }
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.6 : 0.0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)((alive ? 0.05 : 0.0) * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             [self releaseSlots:slots index:index + 1 window:window state:state];
         });
     });
@@ -1193,6 +1197,22 @@ void SCPHostKeepForever(id object) {
             SCPLiveLog(@"SpringBoard restarted during a live session (both=%d); %@",
                         wasBoth, wasBoth ? @"turned \"2 app\" off" : @"will tell the app");
         }
+
+        // Memory warnings for SpringBoard: the phone preview is optional,
+        // so let go of the live apps before iOS starts killing things
+        // (0.9.2 crash: "VM - Fault hit memory shortage").
+        static dispatch_source_t memorySource;
+        memorySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_MEMORYPRESSURE, 0,
+                                              DISPATCH_MEMORYPRESSURE_WARN | DISPATCH_MEMORYPRESSURE_CRITICAL,
+                                              dispatch_get_main_queue());
+        dispatch_source_set_event_handler(memorySource, ^{
+            unsigned long level = dispatch_source_get_data(memorySource);
+            SCPLiveLog(@"[mem] pressure %@ %@", (level & DISPATCH_MEMORYPRESSURE_CRITICAL) ? @"CRITICAL" : @"WARN", SCPMemLine());
+            if (SCPGetLiveState() == SCPLiveStateStarting || SCPGetLiveState() == SCPLiveStateRunning) {
+                [[SCPLivePreviewController sharedInstance] stopWithState:SCPLiveStateFailed reason:@"memory pressure"];
+            }
+        });
+        dispatch_resume(memorySource);
 
         CFNotificationCenterRef darwin = CFNotificationCenterGetDarwinNotifyCenter();
         CFNotificationCenterAddObserver(darwin, NULL,
