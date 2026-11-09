@@ -1236,6 +1236,22 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     _liveTimer = [NSTimer scheduledTimerWithTimeInterval:0.5 target:self selector:@selector(updateLiveUI) userInfo:nil repeats:YES];
 }
 
+// Turning the phone: the live apps are placed for the old layout, so
+// close them and reopen once the rotation has settled.
+- (void)viewWillTransitionToSize:(CGSize)size withTransitionCoordinator:(id<UIViewControllerTransitionCoordinator>)coordinator {
+    [super viewWillTransitionToSize:size withTransitionCoordinator:coordinator];
+    BOOL wasLive = [self liveIsActive];
+    if (wasLive) {
+        _autoStartPending = YES; // not the user's ✕
+        [self stopLiveIfRunning];
+    }
+    [coordinator animateAlongsideTransition:nil completion:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        [self.view setNeedsLayout];
+        [self.view layoutIfNeeded];
+        if (wasLive || self->_visible) [self scheduleAutoStart];
+    }];
+}
+
 - (void)viewDidAppear:(BOOL)animated {
     [super viewDidAppear:animated];
     _visible = YES;
@@ -1254,11 +1270,15 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (void)viewDidLayoutSubviews {
     [super viewDidLayoutSubviews];
     CGRect bounds = self.view.bounds;
-    CGFloat side = 16;
+    UIEdgeInsets safe = self.view.safeAreaInsets;
+    // Landscape (0.9.7): no big title, the car screen takes the height.
+    BOOL landscape = bounds.size.width > bounds.size.height;
+    CGFloat side = 16 + MAX(safe.left, safe.right);
     CGFloat contentW = bounds.size.width - side * 2;
 
-    _headingLabel.frame = CGRectMake(side, self.view.safeAreaInsets.top + 8, contentW, 42);
-    CGFloat paneTop = CGRectGetMaxY(_headingLabel.frame) + 14;
+    _headingLabel.hidden = landscape;
+    _headingLabel.frame = CGRectMake(side, safe.top + 8, contentW, 42);
+    CGFloat paneTop = landscape ? safe.top + 10 : CGRectGetMaxY(_headingLabel.frame) + 14;
 
     // Car screen height ~0.95 x width, but never so tall that the
     // controls + caption below get pushed under the (floating) tab bar.
@@ -1764,6 +1784,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
     [self.view layoutIfNeeded];
+    // SpringBoard is portrait-only; it rotates its overlay to this (see LivePreview.xm kSCPLiveStageTag).
+    SCPSetPref(@"livePreviewOrientation", @(self.view.window.windowScene.interfaceOrientation));
     SCPSetPref(@"livePreviewLeftFrame", NSStringFromCGRect([self liveContentRectOfPane:_leftPane]));
     SCPSetPref(@"livePreviewRightFrame", NSStringFromCGRect([self liveContentRectOfPane:_rightPane]));
     SCPSetPref(@"livePreviewBoth", @(both));

@@ -61,6 +61,32 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
     self.delegate = self; // only for the icon bounce below
 }
 
+#pragma mark - Orientation: only Mô phỏng turns landscape
+
+- (BOOL)previewTabSelected {
+    UIViewController *selected = self.selectedViewController;
+    if ([selected isKindOfClass:[UINavigationController class]]) selected = ((UINavigationController *)selected).topViewController;
+    return [selected isKindOfClass:NSClassFromString(@"PreviewViewController")];
+}
+
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return [self previewTabSelected] ? UIInterfaceOrientationMaskAllButUpsideDown : UIInterfaceOrientationMaskPortrait;
+}
+
+- (BOOL)shouldAutorotate {
+    return YES;
+}
+
+// Leaving Mô phỏng while landscape: iOS 15 doesn't rotate back by itself
+// when the allowed orientations shrink, so ask for portrait.
+- (void)returnToPortraitIfNeeded {
+    if ([self previewTabSelected]) return;
+    UIWindowScene *scene = self.view.window.windowScene;
+    if (!scene || UIInterfaceOrientationIsPortrait(scene.interfaceOrientation)) return;
+    [[UIDevice currentDevice] setValue:@(UIInterfaceOrientationPortrait) forKey:@"orientation"];
+    [UIViewController attemptRotationToDeviceOrientation];
+}
+
 #pragma mark - Selected-tab bounce
 
 // UIKit's own button for the tab at `index`: the bar's UIControl subviews
@@ -94,6 +120,7 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
 }
 
 - (void)tabBarController:(UITabBarController *)tabBarController didSelectViewController:(UIViewController *)viewController {
+    [self returnToPortraitIfNeeded];
     if (UIAccessibilityIsReduceMotionEnabled()) return;
     UIView *button = [self buttonForTabAtIndex:tabBarController.selectedIndex];
     UIView *target = [self iconInTabButton:button] ?: button;

@@ -237,6 +237,11 @@ void SCPHostStripOwnViews(UIView *root) {
 
 #pragma mark - Window that only takes touches on its panes
 
+// Everything shown over the panes lives on a "stage" view laid out in the
+// app's interface coordinates and rotated to match it: SpringBoard is
+// portrait-only, the Mô phỏng tab can be landscape (0.9.7).
+static const NSInteger kSCPLiveStageTag = 7701;
+
 @interface SCPLivePassthroughWindow : UIWindow
 @end
 
@@ -244,7 +249,7 @@ void SCPHostStripOwnViews(UIView *root) {
 - (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
     UIView *hit = [super hitTest:point withEvent:event];
     // Empty areas fall through to the app underneath (the preview screen).
-    if (hit == self || hit == self.rootViewController.view) return nil;
+    if (hit == self || hit == self.rootViewController.view || hit.tag == kSCPLiveStageTag) return nil;
     return hit;
 }
 @end
@@ -290,6 +295,7 @@ void SCPHostStripOwnViews(UIView *root) {
     SpeedBubbleView *_bubble;
     NSTimer *_bubbleTimer;
     UIButton *_closeButton;
+    UIView *_stage;             // see kSCPLiveStageTag
     UIImageView *_edgeChevron;  // on the bubble show/hide handle
     BOOL _tearingDown;          // stop is letting the apps go, step by step
     BOOL _pendingStart;         // START arrived during teardown; run it after
@@ -378,7 +384,7 @@ void SCPHostStripOwnViews(UIView *root) {
             slot.container.backgroundColor = [UIColor colorWithWhite:0.08 alpha:1];
             slot.container.layer.cornerRadius = 10;
             slot.container.clipsToBounds = YES;
-            [_window.rootViewController.view addSubview:slot.container];
+            [_stage addSubview:slot.container];
             slot.loadingView = [self makeLoadingViewForBundleID:slot.bundleID size:frame.size];
             [slot.container addSubview:slot.loadingView];
             [_slots addObject:slot];
@@ -422,6 +428,22 @@ void SCPHostStripOwnViews(UIView *root) {
     UIViewController *root = [UIViewController new];
     root.view.backgroundColor = [UIColor clearColor];
     _window.rootViewController = root;
+
+    // UIInterfaceOrientation of the app when it sent the frames: 3 =
+    // landscape right (home button on the right), 4 = landscape left.
+    NSInteger orientation = [SCPCopyPrefs()[@"livePreviewOrientation"] integerValue];
+    CGSize screen = mainScreen.bounds.size;
+    BOOL landscape = orientation == UIInterfaceOrientationLandscapeLeft || orientation == UIInterfaceOrientationLandscapeRight;
+    UIView *stage = [[UIView alloc] initWithFrame:CGRectMake(0, 0, landscape ? screen.height : screen.width,
+                                                                   landscape ? screen.width : screen.height)];
+    stage.tag = kSCPLiveStageTag;
+    stage.backgroundColor = [UIColor clearColor];
+    stage.center = CGPointMake(screen.width / 2.0, screen.height / 2.0);
+    if (orientation == UIInterfaceOrientationLandscapeRight) stage.transform = CGAffineTransformMakeRotation(M_PI_2);
+    if (orientation == UIInterfaceOrientationLandscapeLeft) stage.transform = CGAffineTransformMakeRotation(-M_PI_2);
+    [root.view addSubview:stage];
+    _stage = stage;
+    SCPLiveLog(@"createWindow: orientation=%ld stage=%@", (long)orientation, NSStringFromCGRect(stage.bounds));
     _window.hidden = NO; // not key: keyboard and focus stay with the app underneath
     SCPLiveLog(@"createWindow: window=%@ level=%.0f", _window, _window.windowLevel);
 }
@@ -471,7 +493,7 @@ void SCPHostStripOwnViews(UIView *root) {
     [closeButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
     closeButton.titleLabel.font = [UIFont boldSystemFontOfSize:15];
     [closeButton addTarget:self action:@selector(closeTapped) forControlEvents:UIControlEventTouchUpInside];
-    [_window.rootViewController.view addSubview:closeButton];
+    [_stage addSubview:closeButton];
 }
 
 - (void)closeTapped {
@@ -584,7 +606,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
         if ([UIDevice currentDevice].batteryMonitoringEnabled == NO) {
             [UIDevice currentDevice].batteryMonitoringEnabled = YES;
         }
-        [_window.rootViewController.view addSubview:bubble];
+        [_stage addSubview:bubble];
         _bubble = bubble;
         [self refreshBubble];
         __weak __typeof__(self) weakSelf = self;
@@ -631,7 +653,7 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
     _edgeChevron.tintColor = [UIColor colorWithWhite:0.35 alpha:1];
     [visual addSubview:_edgeChevron];
     [self updateEdgeChevron];
-    [_window.rootViewController.view addSubview:handle];
+    [_stage addSubview:handle];
 }
 
 - (void)updateEdgeChevron {
@@ -1018,7 +1040,8 @@ static CGSize SCPLiveVirtualSize(CGSize pane) {
             // Nothing that SpringBoard may use is freed: the view
             // controllers stay (reused next time) and so does the hidden
             // window holding their views. Our own views are removed.
-            SCPHostStripOwnViews(window.rootViewController.view);
+            UIView *stage = [window.rootViewController.view viewWithTag:kSCPLiveStageTag];
+            SCPHostStripOwnViews(stage ?: window.rootViewController.view);
             SCPLiveKeepForever(window);
             for (SCPLiveSlot *slot in slots) {
                 slot.appViewController = nil; // still held by SCPLiveKeptObjects
