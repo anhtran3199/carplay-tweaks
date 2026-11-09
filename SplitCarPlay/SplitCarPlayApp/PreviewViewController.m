@@ -1069,6 +1069,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appDidEnterBackground)
                                                  name:UIApplicationDidEnterBackgroundNotification object:nil];
+    // The app switcher (double-tap Home), Control Center or Notification
+    // Center: iOS shrinks and backgrounds every app while our keep-alive
+    // forces the hosted ones to stay foreground, and our window sits above
+    // the switcher. Let go of the apps as soon as this app is covered.
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(appWillResignActive)
+                                                 name:UIApplicationWillResignActiveNotification object:nil];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(scheduleAutoStart)
                                                  name:UIApplicationDidBecomeActiveNotification object:nil];
     [self updateLiveUI];
@@ -1548,6 +1554,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
 - (void)stopLiveIfRunning {
     if ([self liveIsActive]) notify_post(SCP_LIVE_STOP_NOTIFICATION);
+}
+
+- (void)appWillResignActive {
+    [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoStartLive) object:nil];
+    _autoStartPending = YES; // not the user's ✕: no "Đã tắt" hint
+    [self stopLiveIfRunning];
 }
 
 - (void)appDidEnterBackground {
