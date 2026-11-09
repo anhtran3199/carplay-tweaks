@@ -88,7 +88,7 @@ Opening App → Mô phỏng runs the picked apps for real inside the preview
 panes, on the phone screen (0.7.6: automatic, no button or "2 app" switch).
 Ô 1 always, ô 2 too when it holds a different app. Picking/swapping/
 clearing an app or ↻ restarts it; ✕ stops it until then; leaving the tab
-or the app stops it. After a 2-app crash, the next visit runs ô 1 only.
+or the app stops it. A 2-app crash only shows a notice; both apps still run (0.9.4, owner's choice).
 
 `LivePreview.xm` (SpringBoard only) launches each app suspended
 (`FBSSystemService`), wraps its main-display scene in an

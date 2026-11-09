@@ -971,7 +971,6 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     NSTimer *_liveTimer;
     BOOL _visible;          // between viewDidAppear and viewWillDisappear
     BOOL _autoStartPending; // a restart is coming, so a stop isn't the user's ✕
-    BOOL _singleThisVisit;  // SpringBoard crashed with 2 apps last time: run ô 1 only
     BOOL _forceLiveRestart; // next refresh stops the live apps even if nothing changed
     NSString *_liveConfigKey; // apps + split mode the live session was started with
     uint64_t _shownLiveState;
@@ -1185,7 +1184,6 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (void)viewWillDisappear:(BOOL)animated {
     [super viewWillDisappear:animated];
     _visible = NO;
-    _singleThisVisit = NO;
     [NSObject cancelPreviousPerformRequestsWithTarget:self selector:@selector(autoStartLive) object:nil];
     [self stopLiveIfRunning]; // never leave hosted apps floating over another tab
     [_liveTimer invalidate];
@@ -1455,7 +1453,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (NSString *)liveConfigKeyWithPrefs:(NSDictionary *)prefs {
     NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
-    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID] && !_singleThisVisit;
+    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID];
     return [NSString stringWithFormat:@"%@|%@", leftID, both ? rightID : @""];
 }
 
@@ -1506,9 +1504,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     NSInteger crashNotice = [prefs[@"livePreviewCrashNotice"] integerValue];
     if (crashNotice) {
         SplitCarPlaySetPref(@"livePreviewCrashNotice", @0);
-        if (crashNotice == 2) _singleThisVisit = YES;
         _captionLabel.text = crashNotice == 2
-            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode), nên lần này chỉ chạy app ô 1. Chạm vào đây để gửi log."
+            ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode). Chạm vào đây để gửi log."
             : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Chạm vào đây để gửi log.";
     }
 
@@ -1599,7 +1596,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     NSString *leftID = SCPStringPref(prefs, @"leftBundleID");
     NSString *rightID = SCPStringPref(prefs, @"rightBundleID");
     if (leftID.length == 0) return;
-    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID] && !_singleThisVisit;
+    BOOL both = rightID.length > 0 && ![rightID isEqualToString:leftID];
     _liveConfigKey = [self liveConfigKeyWithPrefs:prefs];
     // Content area of each pane (below its title bar), in screen points.
     // This app is full screen, so window coordinates are screen coordinates.
