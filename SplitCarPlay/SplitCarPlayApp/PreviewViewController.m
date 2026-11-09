@@ -233,6 +233,34 @@ static CGFloat SCPHairline(void) {
     return scale > 0 ? 1.0 / scale : 1.0;
 }
 
+// Non-essential motion is skipped with Reduce Motion on (fades still run).
+static inline BOOL SCPPreviewReduceMotion(void) {
+    return UIAccessibilityIsReduceMotionEnabled();
+}
+
+// Scales a view's sublayers -- not the view -- around its centre, so the
+// frames that layout code sets on it and its subviews stay untouched (and
+// nothing sent to SpringBoard ever changes). Used for press-down and the
+// divider pill. Identity under Reduce Motion.
+static void SCPSetSublayerScale(UIView *view, CGFloat sx, CGFloat sy) {
+    CALayer *layer = view.layer;
+    CATransform3D target = SCPPreviewReduceMotion() ? CATransform3DIdentity : CATransform3DMakeScale(sx, sy, 1);
+    if (CATransform3DEqualToTransform(layer.sublayerTransform, target)) return;
+    if (!SCPPreviewReduceMotion()) {
+        CALayer *current = layer.presentationLayer ?: layer;
+        CABasicAnimation *scale = [CABasicAnimation animationWithKeyPath:@"sublayerTransform"];
+        scale.fromValue = [NSValue valueWithCATransform3D:current.sublayerTransform];
+        scale.toValue = [NSValue valueWithCATransform3D:target];
+        scale.duration = 0.2;
+        scale.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+        [layer addAnimation:scale forKey:@"scpSublayerScale"];
+    }
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    layer.sublayerTransform = target;
+    [CATransaction commit];
+}
+
 // Pref values are expected to be strings; anything else (missing, wrong
 // type) reads as "" so callers can just check .length.
 static NSString *SCPStringPref(NSDictionary *prefs, NSString *key) {
@@ -665,6 +693,13 @@ static const CGFloat kSCPCarFramePad = 6;     // outer car-screen frame around b
                                        floor((self.bounds.size.height - s) / 2.0), s, s);
     [self sendSubviewToBack:self.circleView];
 }
+
+// Press-down: circle + glyph shrink a little while touched.
+- (void)setHighlighted:(BOOL)highlighted {
+    BOOL changed = highlighted != self.highlighted;
+    [super setHighlighted:highlighted];
+    if (changed) SCPSetSublayerScale(self, highlighted ? 0.85 : 1.0, highlighted ? 0.85 : 1.0);
+}
 @end
 
 static SCPCircleButton *SCPMakeCircleButton(NSString *symbolName) {
@@ -812,7 +847,21 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     return self;
 }
 
+// Crossfades the pane's content and tab when what it shows changes (an
+// app picked/cleared, the snapshot arriving). Opacity only: the pane
+// frames, which SpringBoard follows while live, are never animated.
+- (void)crossfadeIfShowingName:(NSString *)name snapshot:(UIImage *)snapshot empty:(BOOL)empty {
+    if (!self.window) return;
+    BOOL same = empty == _isEmpty && snapshot == _snapshotView.image
+        && (empty || [name isEqualToString:_tabLabel.text]);
+    if (same) return;
+    UIViewAnimationOptions fade = UIViewAnimationOptionTransitionCrossDissolve | UIViewAnimationOptionAllowUserInteraction;
+    [UIView transitionWithView:_contentView duration:0.25 options:fade animations:nil completion:nil];
+    [UIView transitionWithView:_tabControl duration:0.25 options:fade animations:nil completion:nil];
+}
+
 - (void)showEmpty {
+    [self crossfadeIfShowingName:nil snapshot:nil empty:YES];
     _isEmpty = YES;
     _hasSnapshot = NO;
     _tabIcon.image = [SCPSymbol(@"plus", 11, NO) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
@@ -827,6 +876,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 }
 
 - (void)showAppNamed:(NSString *)name icon:(UIImage *)icon snapshot:(UIImage *)snapshot {
+    [self crossfadeIfShowingName:name snapshot:snapshot empty:NO];
     _isEmpty = NO;
     _hasSnapshot = snapshot != nil;
     _tabIcon.image = icon;
@@ -964,6 +1014,9 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     CGFloat _dragStartRatio;
     BOOL _bubbleWasAdjusted; // once the bubble's been dragged, stop re-centering it every layout pass
     BOOL _bubbleHiddenLocally; // edge-handle toggle; preview only, never written to prefs
+    NSUInteger _bubbleAnimToken; // bumps per show/hide, so a stale hide completion can't hide a re-shown bubble
+    BOOL _bubbleFading;          // hide animation running; updateLiveUI leaves .hidden alone meanwhile
+    UIImpactFeedbackGenerator *_dividerHaptic;
 
     // Real apps hosted over the panes by SpringBoard (LivePreview.xm),
     // started automatically while this tab is on screen. State comes back
@@ -1148,6 +1201,12 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     if (usableWidth <= 0) return;
     if (gesture.state == UIGestureRecognizerStateBegan) {
         _dragStartRatio = _splitRatio > 0 ? _splitRatio : 0.5;
+        // Soft tap + the pill grows a little while held. Both are on the
+        // pill's container only; the panes' frames are untouched.
+        if (!_dividerHaptic) _dividerHaptic = [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleSoft];
+        [_dividerHaptic impactOccurred];
+        [_dividerHaptic prepare];
+        SCPSetSublayerScale(_dividerHandle, 1.3, 1.1);
     }
     CGFloat deltaRatio = [gesture translationInView:self.view].x / usableWidth;
     _splitRatio = MAX(0.2, MIN(0.8, _dragStartRatio + deltaRatio));
@@ -1161,6 +1220,8 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
         SCPPostLiveResize(leftRect.size.width, rightRect.origin.x, rightRect.size.width, ended);
     }
     if (ended) {
+        [_dividerHaptic impactOccurred];
+        SCPSetSublayerScale(_dividerHandle, 1.0, 1.0);
         // Persist only once the drag finishes -- matches the slider's
         // own behavior and avoids writing the plist on every pixel.
         SplitCarPlaySetPref(@"splitRatio", @(_splitRatio));
@@ -1232,7 +1293,9 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     CGFloat edgeVisualW = 14, edgeH = 84;
     _edgeHandle.frame = CGRectMake(CGRectGetMinX(_carScreenFrame.frame), paneTop + kSCPPaneBarHeight + 14, 44, edgeH); // 44 pt target, 14 pt visual
     _edgeVisual.frame = CGRectMake(0, 0, edgeVisualW, edgeH);
-    _edgeChevron.frame = CGRectMake(floor((edgeVisualW - 9) / 2.0), floor((edgeH - 12) / 2.0), 9, 12);
+    // bounds + center: the chevron is rotated (› / ‹), and -frame is undefined then.
+    _edgeChevron.bounds = CGRectMake(0, 0, 9, 12);
+    _edgeChevron.center = CGPointMake(floor((edgeVisualW - 9) / 2.0) + 4.5, floor((edgeH - 12) / 2.0) + 6);
 
     CGFloat bubbleW = 96, bubbleH = 196;
     switch ((SplitCarPlayBubbleStyle)_styleControl.selectedSegmentIndex) {
@@ -1293,14 +1356,114 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 
 - (void)edgeHandleTapped {
     _bubbleHiddenLocally = !_bubbleHiddenLocally;
-    _bubble.hidden = _bubbleHiddenLocally || [self liveIsActive]; // SpringBoard draws it while live
-    [self updateEdgeChevron];
+    BOOL live = [self liveIsActive];
+    if (live || !self.view.window) {
+        // SpringBoard draws it while live; nothing to animate here.
+        _bubbleAnimToken++;
+        _bubbleFading = NO;
+        _bubble.hidden = _bubbleHiddenLocally || live;
+        _bubble.alpha = 1;
+        [_bubble setScale:_bubble.scale]; // drop a half-done show/hide scale
+    } else {
+        [self animateBubbleVisible:!_bubbleHiddenLocally];
+    }
+    [self updateEdgeChevronAnimated:YES];
 }
 
-// "›" = pull the card out (currently hidden), "‹" = tuck it away.
+// Fade + scale (from/to 85 % of its pinch scale) in, fade + shrink out.
+// Reduce Motion: fade only. The bubble's pinch transform is restored at
+// the end, and its bounds/center (sent to SpringBoard) aren't touched.
+- (void)animateBubbleVisible:(BOOL)visible {
+    PreviewBubbleView *bubble = _bubble;
+    NSUInteger token = ++_bubbleAnimToken;
+    CGFloat s = bubble.scale;
+    CGAffineTransform full = CGAffineTransformMakeScale(s, s);
+    CGAffineTransform small = SCPPreviewReduceMotion() ? full : CGAffineTransformMakeScale(s * 0.85, s * 0.85);
+    UIViewAnimationOptions options = UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState;
+    if (visible) {
+        _bubbleFading = NO;
+        if (bubble.hidden) {
+            bubble.alpha = 0;
+            bubble.transform = small;
+            bubble.hidden = NO;
+        }
+        [UIView animateWithDuration:0.3 delay:0 usingSpringWithDamping:0.8 initialSpringVelocity:0 options:options
+                         animations:^{
+            bubble.alpha = 1;
+            bubble.transform = full;
+        } completion:nil];
+        return;
+    }
+    _bubbleFading = YES;
+    __weak __typeof__(self) weakSelf = self;
+    [UIView animateWithDuration:0.2 delay:0 options:options | UIViewAnimationOptionCurveEaseIn
+                     animations:^{
+        bubble.alpha = 0;
+        bubble.transform = small;
+    } completion:^(BOOL finished) {
+        __strong __typeof__(weakSelf) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_bubbleAnimToken != token) return; // shown again meanwhile
+        strongSelf->_bubbleFading = NO;
+        bubble.hidden = YES;
+        bubble.alpha = 1;
+        [bubble setScale:bubble.scale]; // back to the plain pinch transform
+    }];
+}
+
+// One "‹" glyph: as is = tuck the card away, turned 180° = "›" pull it out.
+// The turn is animated (an explicit rotation so it always spins the same
+// way); Reduce Motion or no window just sets it.
+- (void)updateEdgeChevronAnimated:(BOOL)animated {
+    if (!_edgeChevron.image) {
+        _edgeChevron.image = [SCPSymbol(@"chevron.left", 10, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    }
+    CGFloat angle = _bubbleHiddenLocally ? M_PI : 0;
+    if (animated && _edgeChevron.window && !SCPPreviewReduceMotion()) {
+        CABasicAnimation *turn = [CABasicAnimation animationWithKeyPath:@"transform.rotation.z"];
+        turn.fromValue = @(_bubbleHiddenLocally ? 0 : M_PI);
+        turn.toValue = @(angle);
+        turn.duration = 0.3;
+        turn.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseInEaseOut];
+        [_edgeChevron.layer addAnimation:turn forKey:@"scpTurn"];
+    }
+    _edgeChevron.transform = CGAffineTransformMakeRotation(angle);
+}
+
 - (void)updateEdgeChevron {
-    NSString *name = _bubbleHiddenLocally ? @"chevron.right" : @"chevron.left";
-    _edgeChevron.image = [SCPSymbol(name, 10, YES) imageWithRenderingMode:UIImageRenderingModeAlwaysTemplate];
+    [self updateEdgeChevronAnimated:NO];
+}
+
+// Captions (errors/hints) fade in and out instead of popping. The text is
+// still set right away -- layout sizes the car screen from it -- the old
+// caption fades out as a snapshot.
+- (void)setCaptionText:(NSString *)text {
+    NSString *old = _captionLabel.text;
+    if ((old.length == 0 && text.length == 0) || [old isEqualToString:text]) {
+        _captionLabel.text = text;
+        return;
+    }
+    BOOL onScreen = _captionLabel.window != nil;
+    if (onScreen && old.length > 0 && _captionLabel.bounds.size.height > 0) {
+        UIView *ghost = [_captionLabel snapshotViewAfterScreenUpdates:NO];
+        if (ghost) {
+            ghost.frame = _captionLabel.frame;
+            ghost.userInteractionEnabled = NO;
+            [self.view insertSubview:ghost aboveSubview:_captionLabel];
+            [UIView animateWithDuration:0.2 delay:0 options:UIViewAnimationOptionAllowUserInteraction
+                             animations:^{ ghost.alpha = 0; }
+                             completion:^(BOOL finished) { [ghost removeFromSuperview]; }];
+        }
+    }
+    _captionLabel.text = text;
+    if (onScreen && text.length > 0) {
+        _captionLabel.alpha = 0;
+        UILabel *caption = _captionLabel;
+        [UIView animateWithDuration:0.25 delay:0.05 options:UIViewAnimationOptionAllowUserInteraction
+                         animations:^{ caption.alpha = 1; }
+                         completion:nil];
+    } else {
+        _captionLabel.alpha = 1;
+    }
 }
 
 - (void)showAppPickerForLeftSide:(BOOL)isLeft {
@@ -1504,9 +1667,9 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     NSInteger crashNotice = [prefs[@"livePreviewCrashNotice"] integerValue];
     if (crashNotice) {
         SplitCarPlaySetPref(@"livePreviewCrashNotice", @0);
-        _captionLabel.text = crashNotice == 2
+        [self setCaptionText:crashNotice == 2
             ? @"Lần trước chạy 2 app làm SpringBoard bị lỗi (máy vào safe mode). Chạm vào đây để gửi log."
-            : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Chạm vào đây để gửi log.";
+            : @"Lần trước chạy app thật làm SpringBoard bị lỗi. Chạm vào đây để gửi log."];
     }
 
     // Newer of the shared file and the notify-state copy (the file may be
@@ -1588,7 +1751,7 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     if ([self liveIsActive]) return;
     if (SCPGetCarPlayState() == SCPCarPlayStateShowing) {
         // SpringBoard won't show the same apps in two places.
-        _captionLabel.text = @"App đang hiển thị trên CarPlay, nên Mô phỏng tạm không chạy app thật.";
+        [self setCaptionText:@"App đang hiển thị trên CarPlay, nên Mô phỏng tạm không chạy app thật."];
         [self.view setNeedsLayout];
         return;
     }
@@ -1622,24 +1785,26 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
 - (void)updateLiveUI {
     uint64_t state = SCPGetLiveState();
     BOOL live = state == SCPLiveStateStarting || state == SCPLiveStateRunning;
-    _bubble.hidden = _bubbleHiddenLocally || live; // SpringBoard draws it on top while live
+    // SpringBoard draws it on top while live. A running hide fade (edge
+    // handle) finishes on its own unless live takes over.
+    if (live || !_bubbleFading) _bubble.hidden = _bubbleHiddenLocally || live;
     if (state == _shownLiveState) return;
     BOOL wasLive = _shownLiveState == SCPLiveStateStarting || _shownLiveState == SCPLiveStateRunning;
     _shownLiveState = state;
     if (wasLive && !live) [self restoreBubbleFromLive];
     switch (state) {
         case SCPLiveStateStarting:
-            _captionLabel.text = nil;
+            [self setCaptionText:nil];
             break;
         case SCPLiveStateRunning:
-            _captionLabel.text = nil;
+            [self setCaptionText:nil];
             break;
         case SCPLiveStateFailed:
-            _captionLabel.text = @"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Chạm vào đây để gửi log.";
+            [self setCaptionText:@"App thật không mở được hoặc đã bị iOS đóng (thường do thiếu RAM khi chạy 2 app). Chạm vào đây để gửi log."];
             break;
         default:
             // Closed with ✕ while on screen: say how to get it back.
-            _captionLabel.text = (wasLive && _visible && !_autoStartPending) ? @"Đã tắt app thật. Bấm nút ↻ xanh ở khung để mở lại." : nil;
+            [self setCaptionText:(wasLive && _visible && !_autoStartPending) ? @"Đã tắt app thật. Bấm nút ↻ xanh ở khung để mở lại." : nil];
             break;
     }
     [self.view setNeedsLayout];
@@ -1658,6 +1823,10 @@ static void SCPStyleCircleButton(SCPCircleButton *button, UIColor *fill, UIColor
     // Shown/hidden with SpringBoard's copy of the edge handle while live.
     if (prefs[@"livePreviewBubbleHidden"]) {
         _bubbleHiddenLocally = [prefs[@"livePreviewBubbleHidden"] boolValue];
+        _bubbleAnimToken++; // cancel any pending show/hide completion
+        _bubbleFading = NO;
+        _bubble.alpha = 1;
+        [_bubble setScale:_bubble.scale]; // drop a half-done show/hide scale
         _bubble.hidden = _bubbleHiddenLocally;
         [self updateEdgeChevron];
     }

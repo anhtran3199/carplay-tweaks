@@ -363,7 +363,10 @@ static UIImage *SCPRowIconUncached(NSString *symbol, UIColor *color) {
         return;
     }
     SplitCarPlaySetPref(@"carApps", [_chosen copy]);
-    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationNone];
+    [[[UISelectionFeedbackGenerator alloc] init] selectionChanged];
+    // Fade: the checkmark crossfades in/out instead of snapping (opacity
+    // only, so it's fine with Reduce Motion too).
+    [tableView reloadRowsAtIndexPaths:@[indexPath] withRowAnimation:UITableViewRowAnimationFade];
     [self updateTitle];
 }
 

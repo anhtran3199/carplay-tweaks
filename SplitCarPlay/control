@@ -1,6 +1,6 @@
 Package: com.example.splitcarplay
 Name: SplitCarPlay
-Version: 0.9.4
+Version: 0.9.5
 Architecture: iphoneos-arm
 Description: Companion app (Trang chủ/Trên xe/Mô phỏng/Tài khoản) for a side-by-side CarPlay split screen, with a speed card that reads Vietmap Live's speed/limit. On-car hosting is an opt-in, one-shot experiment with auto tear-down; see ROADMAP.md.
 Maintainer: anhtran3199@gmail.com

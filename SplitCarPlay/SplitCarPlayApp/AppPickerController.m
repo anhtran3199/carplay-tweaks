@@ -163,6 +163,20 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
 // Presented over the current screen as a floating white card (faint dim
 // behind it) rather than a full-screen sheet -- matches the reference
 // "Chọn app ô 1/2" screenshots. Tap the dim area or ✕ to dismiss.
+//
+// Motion: UIKit's cross-dissolve fades the backdrop and card in/out; on
+// top of that the card scales 0.94 -> 1 and slides up a little (skipped
+// with Reduce Motion, which leaves the plain fade).
+
+static inline BOOL SCPPickerReduceMotion(void) {
+    return UIAccessibilityIsReduceMotionEnabled();
+}
+
+static CGAffineTransform SCPPickerCardOffTransform(void) {
+    return CGAffineTransformScale(CGAffineTransformMakeTranslation(0, 16), 0.94, 0.94);
+}
+
+static const NSInteger kSCPPickerIconTag = 201;
 
 @interface AppPickerController : UIViewController
 @property (nonatomic, copy) void (^onPick)(NSString *bundleID);
@@ -177,6 +191,7 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     UIButton *_closeButton;
     UIScrollView *_scroll;
     CGFloat _gridWidth; // width the grid was last built for; rebuilt only when it changes
+    UISelectionFeedbackGenerator *_selectionHaptic;
 }
 
 + (void)presentFrom:(UIViewController *)presenter title:(NSString *)title onPick:(void (^)(NSString *bundleID))onPick {
@@ -250,7 +265,10 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     CGFloat height = MIN(bounds.size.height * 0.60, bounds.size.height - top - self.view.safeAreaInsets.bottom - 16);
     height = MAX(height, 200);
     CGRect cardFrame = CGRectMake(16, top, bounds.size.width - 32, height);
-    _card.frame = cardFrame;
+    // bounds + center, not frame: the card carries a transform while it
+    // animates in/out, and -frame is undefined then.
+    _card.bounds = CGRectMake(0, 0, cardFrame.size.width, cardFrame.size.height);
+    _card.center = CGPointMake(CGRectGetMidX(cardFrame), CGRectGetMidY(cardFrame));
     _card.layer.shadowPath = [UIBezierPath bezierPathWithRoundedRect:_card.bounds cornerRadius:16].CGPath;
 
     _titleLabel.frame = CGRectMake(18, 14, cardFrame.size.width - 18 - 52, 24);
@@ -264,6 +282,28 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
         _gridWidth = _scroll.bounds.size.width;
         [self populateGrid];
     }
+}
+
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    if (!animated || SCPPickerReduceMotion()) return;
+    // Runs next to UIKit's cross-dissolve (which fades backdrop + card).
+    _card.transform = SCPPickerCardOffTransform();
+    UIView *card = _card;
+    [UIView animateWithDuration:0.35 delay:0 usingSpringWithDamping:0.85 initialSpringVelocity:0
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ card.transform = CGAffineTransformIdentity; }
+                     completion:nil];
+}
+
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    id<UIViewControllerTransitionCoordinator> coordinator = self.transitionCoordinator;
+    if (!animated || !coordinator || SCPPickerReduceMotion()) return;
+    UIView *card = _card;
+    [coordinator animateAlongsideTransition:^(id<UIViewControllerTransitionCoordinatorContext> context) {
+        card.transform = SCPPickerCardOffTransform();
+    } completion:nil];
 }
 
 - (void)close {
@@ -317,8 +357,12 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
         button.accessibilityIdentifier = bundleID;
         button.accessibilityLabel = name;
         [button addTarget:self action:@selector(appTapped:) forControlEvents:UIControlEventTouchUpInside];
+        [button addTarget:self action:@selector(appPressDown:) forControlEvents:UIControlEventTouchDown | UIControlEventTouchDragEnter];
+        [button addTarget:self action:@selector(appPressUp:)
+         forControlEvents:UIControlEventTouchUpInside | UIControlEventTouchUpOutside | UIControlEventTouchDragExit | UIControlEventTouchCancel];
 
         UIImageView *icon = [[UIImageView alloc] initWithFrame:CGRectMake(floor((itemWidth - iconSize) / 2.0), 0, iconSize, iconSize)];
+        icon.tag = kSCPPickerIconTag;
         icon.image = SplitCarPlayAppIcon(bundleID);
         icon.contentMode = UIViewContentModeScaleAspectFit;
         icon.layer.cornerRadius = 13;
@@ -347,9 +391,34 @@ NSArray<NSString *> *SplitCarPlayRecentBundleIDs(void) {
     return rowY + 6;
 }
 
+// Icon press-down: shrinks to 0.92 while the finger is on it, springs back
+// on release/cancel. The icon's frame is set once when the grid is built,
+// so a transform on it is safe.
+- (void)setIconOf:(UIButton *)button pressed:(BOOL)pressed {
+    UIView *icon = [button viewWithTag:kSCPPickerIconTag];
+    if (!icon) return;
+    CGAffineTransform target = (pressed && !SCPPickerReduceMotion()) ? CGAffineTransformMakeScale(0.92, 0.92) : CGAffineTransformIdentity;
+    [UIView animateWithDuration:(pressed ? 0.15 : 0.3) delay:0 usingSpringWithDamping:(pressed ? 0.9 : 0.75) initialSpringVelocity:0
+                        options:UIViewAnimationOptionAllowUserInteraction | UIViewAnimationOptionBeginFromCurrentState
+                     animations:^{ icon.transform = target; }
+                     completion:nil];
+}
+
+- (void)appPressDown:(UIButton *)sender {
+    [self setIconOf:sender pressed:YES];
+    if (!_selectionHaptic) _selectionHaptic = [[UISelectionFeedbackGenerator alloc] init];
+    [_selectionHaptic prepare];
+}
+
+- (void)appPressUp:(UIButton *)sender {
+    [self setIconOf:sender pressed:NO];
+}
+
 - (void)appTapped:(UIButton *)sender {
     NSString *bundleID = sender.accessibilityIdentifier;
     if (bundleID.length == 0) return;
+    if (!_selectionHaptic) _selectionHaptic = [[UISelectionFeedbackGenerator alloc] init];
+    [_selectionHaptic selectionChanged];
     if (self.onPick) self.onPick(bundleID);
     [self close];
 }

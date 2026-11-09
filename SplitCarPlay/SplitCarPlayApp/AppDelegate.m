@@ -33,7 +33,7 @@ static const CGFloat kSCPTabBarSideInset = 12;
 static const CGFloat kSCPTabBarBottomGap = 6; // only on phones without a home indicator
 static const CGFloat kSCPTabBarCornerRadius = 20;
 
-@interface SCPFloatingTabBarController : UITabBarController
+@interface SCPFloatingTabBarController : UITabBarController <UITabBarControllerDelegate>
 @end
 
 @implementation SCPFloatingTabBarController {
@@ -58,6 +58,54 @@ static const CGFloat kSCPTabBarCornerRadius = 20;
     bar.layer.shadowOffset = CGSizeMake(0, 4);
     _appliedBottomGap = -1;
     [self applyAppearanceWithIndicator:nil];
+    self.delegate = self; // only for the icon bounce below
+}
+
+#pragma mark - Selected-tab bounce
+
+// UIKit's own button for the tab at `index`: the bar's UIControl subviews
+// in on-screen order. nil if that doesn't match the item count (then we
+// just skip the bounce).
+- (UIView *)buttonForTabAtIndex:(NSUInteger)index {
+    NSMutableArray<UIView *> *buttons = [NSMutableArray new];
+    for (UIView *subview in self.tabBar.subviews) {
+        if ([subview isKindOfClass:[UIControl class]]) [buttons addObject:subview];
+    }
+    if (buttons.count != self.tabBar.items.count || index >= buttons.count) return nil;
+    [buttons sortUsingComparator:^NSComparisonResult(UIView *a, UIView *b) {
+        CGFloat ax = CGRectGetMinX(a.frame), bx = CGRectGetMinX(b.frame);
+        return ax < bx ? NSOrderedAscending : (ax > bx ? NSOrderedDescending : NSOrderedSame);
+    }];
+    if (self.tabBar.effectiveUserInterfaceLayoutDirection == UIUserInterfaceLayoutDirectionRightToLeft) {
+        index = buttons.count - 1 - index;
+    }
+    return buttons[index];
+}
+
+// The icon is the smallest image view in the button (anything bigger is
+// background/selection art).
+- (UIView *)iconInTabButton:(UIView *)button {
+    UIView *icon = nil;
+    for (UIView *subview in button.subviews) {
+        if (![subview isKindOfClass:[UIImageView class]] || subview.bounds.size.width <= 0) continue;
+        if (!icon || subview.bounds.size.width < icon.bounds.size.width) icon = subview;
+    }
+    return icon;
+}
+
+- (void)tabBarController:(UITabBarController *)tabBarController didSelectViewController:(UIViewController *)viewController {
+    if (UIAccessibilityIsReduceMotionEnabled()) return;
+    UIView *button = [self buttonForTabAtIndex:tabBarController.selectedIndex];
+    UIView *target = [self iconInTabButton:button] ?: button;
+    if (!target) return;
+    // Layer-only keyframes (presentation layer), so the bar's own layout
+    // and frames are never touched.
+    CAKeyframeAnimation *bounce = [CAKeyframeAnimation animationWithKeyPath:@"transform.scale"];
+    bounce.values = @[@1.0, @0.86, @1.12, @0.97, @1.0];
+    bounce.keyTimes = @[@0, @0.2, @0.5, @0.75, @1];
+    bounce.duration = 0.35;
+    bounce.timingFunction = [CAMediaTimingFunction functionWithName:kCAMediaTimingFunctionEaseOut];
+    [target.layer addAnimation:bounce forKey:@"scpTabBounce"];
 }
 
 - (void)applyAppearanceWithIndicator:(UIImage *)indicator {
