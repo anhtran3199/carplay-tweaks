@@ -439,8 +439,9 @@ static const NSInteger kSCPLiveStageTag = 7701;
     stage.tag = kSCPLiveStageTag;
     stage.backgroundColor = [UIColor clearColor];
     stage.center = CGPointMake(screen.width / 2.0, screen.height / 2.0);
-    if (orientation == UIInterfaceOrientationLandscapeRight) stage.transform = CGAffineTransformMakeRotation(M_PI_2);
-    if (orientation == UIInterfaceOrientationLandscapeLeft) stage.transform = CGAffineTransformMakeRotation(-M_PI_2);
+    // Signs checked on the device (0.9.7 had them swapped: everything showed upside down).
+    if (orientation == UIInterfaceOrientationLandscapeRight) stage.transform = CGAffineTransformMakeRotation(-M_PI_2);
+    if (orientation == UIInterfaceOrientationLandscapeLeft) stage.transform = CGAffineTransformMakeRotation(M_PI_2);
     [root.view addSubview:stage];
     _stage = stage;
     SCPLiveLog(@"createWindow: orientation=%ld stage=%@", (long)orientation, NSStringFromCGRect(stage.bounds));
