@@ -39,6 +39,16 @@ that already worked in the first car test. A CarPlay session closes the
 phone preview and blocks it until the session ends, so an app's view is
 never in both places.
 
+Detecting the car (0.9.9). Nothing started on connect before: SpringBoard
+doesn't reliably get `UIScreenDidConnect`/`DidDisconnect` for the CarPlay
+display, and the display was matched by name only. Now SpringBoard checks
+the display list every 2 s and finds the car the way carplay-cast does
+(`+[AVExternalDevice currentCarPlayExternalDevice]`'s `screenIDs` against
+`-[CADisplay uniqueId]`), with the name and "the only external display
+while a CarPlay device is connected" as fallbacks. Each change of the
+display list is logged (`[car] displays changed`), and the car window sits
+above CarPlayApp's UI (`windowLevel`).
+
 Still unknown until a car test (all logged with a `[car]` prefix):
 
 - whether touches on the car screen reach the hosted apps (the log lists

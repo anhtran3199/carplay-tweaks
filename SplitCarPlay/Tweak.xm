@@ -192,15 +192,74 @@ static void SplitCarPlayLoadMediaRemote(void) {
 - (instancetype)initWithIdentifier:(NSString *)identifier andApplicationSceneEntity:(id)entity;
 @end
 
+static NSString *SplitCarPlayDisplayUniqueID(id display) {
+    SEL sel = NSSelectorFromString(@"uniqueId");
+    if (![display respondsToSelector:sel]) return nil;
+    id value = ((id (*)(id, SEL))objc_msgSend)(display, sel);
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
+// The CarPlay device the phone is connected to (AVFoundation's private
+// AVExternalDevice), or nil when there is none / the class isn't there.
+static id SplitCarPlayCurrentCarPlayDevice(void) {
+    Class deviceClass = objc_getClass("AVExternalDevice");
+    SEL current = NSSelectorFromString(@"currentCarPlayExternalDevice");
+    if (![deviceClass respondsToSelector:current]) return nil;
+    return ((id (*)(id, SEL))objc_msgSend)(deviceClass, current);
+}
+
+static NSString *SplitCarPlayDescribeDisplays(void) {
+    NSMutableArray<NSString *> *parts = [NSMutableArray new];
+    for (CADisplay *display in [objc_getClass("CADisplay") displays]) {
+        [parts addObject:[NSString stringWithFormat:@"name=%@ uniqueId=%@ frame=%@",
+                          display.name, SplitCarPlayDisplayUniqueID(display), NSStringFromCGRect(display.frame)]];
+    }
+    id device = SplitCarPlayCurrentCarPlayDevice();
+    NSArray *screenIDs = [device respondsToSelector:NSSelectorFromString(@"screenIDs")]
+        ? ((id (*)(id, SEL))objc_msgSend)(device, NSSelectorFromString(@"screenIDs")) : nil;
+    return [NSString stringWithFormat:@"%@ | carPlayDevice=%@ screenIDs=%@",
+            [parts componentsJoinedByString:@" ; "], device, screenIDs];
+}
+
+// The CarPlay CADisplay, or nil. 0.9.9: the old check (name contains
+// "CarPlay") alone found nothing on the car, so nothing ever started.
+//   1. carplay-cast's getCarplayCADisplay(): the screen ID of
+//      +[AVExternalDevice currentCarPlayExternalDevice] matched against
+//      -[CADisplay uniqueId].
+//   2. A display whose name contains "CarPlay".
+//   3. A CarPlay device is connected but no ID matched: the only external
+//      display there is. Never used without a CarPlay device, so an AirPlay
+//      screen is left alone.
 static id getCarPlayDisplay(void) {
     Class displayClass = objc_getClass("CADisplay");
     if (!displayClass) return nil;
-    for (CADisplay *display in [displayClass displays]) {
-        // VERIFIED pattern from carplay-cast's getCarplayCADisplay(): the
-        // CarPlay external display's name contains "CarPlay".
-        if ([display.name rangeOfString:@"CarPlay" options:NSCaseInsensitiveSearch].location != NSNotFound) {
+    NSArray *displays = [displayClass displays];
+    if (displays.count < 2) return nil; // only the phone's own screen: cheap early out
+
+    id device = SplitCarPlayCurrentCarPlayDevice();
+    NSArray *screenIDs = [device respondsToSelector:NSSelectorFromString(@"screenIDs")]
+        ? ((id (*)(id, SEL))objc_msgSend)(device, NSSelectorFromString(@"screenIDs")) : nil;
+    if ([screenIDs isKindOfClass:[NSArray class]]) {
+        for (CADisplay *display in displays) {
+            NSString *uniqueID = SplitCarPlayDisplayUniqueID(display);
+            if (uniqueID.length && [screenIDs containsObject:uniqueID]) return display;
+        }
+    }
+    for (CADisplay *display in displays) {
+        // length check: a nil name gives location 0, which isn't NSNotFound.
+        NSString *name = display.name;
+        if (name.length && [name rangeOfString:@"CarPlay" options:NSCaseInsensitiveSearch].location != NSNotFound) {
             return display;
         }
+    }
+    if (device) {
+        id mainDisplay = [displayClass respondsToSelector:NSSelectorFromString(@"mainDisplay")]
+            ? ((id (*)(id, SEL))objc_msgSend)(displayClass, NSSelectorFromString(@"mainDisplay")) : displays.firstObject;
+        NSMutableArray *external = [NSMutableArray new];
+        for (CADisplay *display in displays) {
+            if (display != mainDisplay) [external addObject:display];
+        }
+        if (external.count == 1) return external.firstObject;
     }
     return nil;
 }
@@ -785,7 +844,12 @@ static void SplitCarPlayRestoreBrightness(void) {
 - (void)publishCarPlayState;
 @property (nonatomic, assign) NSUInteger sessionGeneration; // invalidates pending callbacks after teardown
 @property (nonatomic, strong) UIButton *carCloseButton;
+@property (nonatomic, assign) BOOL carPlayDisplayPresent; // last seen by checkCarPlayDisplay
+@property (nonatomic, assign) NSUInteger lastDisplayCount;
+@property (nonatomic, strong) NSTimer *displayWatchTimer;
 + (instancetype)sharedInstance;
+- (void)startWatchingCarPlayDisplay;
+- (void)checkCarPlayDisplay;
 - (void)teardown;
 - (void)reloadFromPreferences;
 - (void)refreshSpeedBubble;
@@ -802,6 +866,54 @@ static void SplitCarPlayRestoreBrightness(void) {
         shared.splitRatio = 0.5;
     });
     return shared;
+}
+
+#pragma mark CarPlay connect / disconnect
+
+// SpringBoard doesn't reliably get UIScreenDidConnect/DidDisconnect for the
+// CarPlay display (iOS 13+ hands it to CarPlayApp), so the session never
+// started on connect and dismissedUntilReconnect was never cleared. A cheap
+// 2 s check of the display list catches both directions; the UIScreen
+// notifications just make it react sooner.
+- (void)startWatchingCarPlayDisplay {
+    if (self.displayWatchTimer) return;
+    __weak __typeof__(self) weakSelf = self;
+    self.displayWatchTimer = [NSTimer scheduledTimerWithTimeInterval:2.0 repeats:YES block:^(NSTimer *timer) {
+        [weakSelf checkCarPlayDisplay];
+    }];
+    self.displayWatchTimer.tolerance = 0.5;
+    [self checkCarPlayDisplay];
+}
+
+- (void)checkCarPlayDisplay {
+    NSUInteger count = [[objc_getClass("CADisplay") displays] count];
+    // Same display list as last time: nothing to look up (unplugging the car
+    // always changes the count). Skips the AVExternalDevice lookup.
+    if (count == self.lastDisplayCount && (count < 2 || self.carPlayDisplayPresent)) return;
+    BOOL countChanged = count != self.lastDisplayCount;
+    self.lastDisplayCount = count;
+    if (countChanged) SplitCarPlayHostingLog(@"[car] displays changed (%lu): %@", (unsigned long)count, SplitCarPlayDescribeDisplays());
+
+    BOOL present = getCarPlayDisplay() != nil;
+    if (present == self.carPlayDisplayPresent) return;
+    self.carPlayDisplayPresent = present;
+
+    if (present) {
+        SplitCarPlayHostingLog(@"[car] CarPlay connected");
+        self.dismissedUntilReconnect = NO; // a new connection may auto-start again
+        [self reloadFromPreferences];
+        return;
+    }
+    SplitCarPlayHostingLog(@"[car] CarPlay disconnected");
+    [self teardown];
+    self.dismissedUntilReconnect = NO;
+    [self publishCarPlayState];
+    if (self.autoExitSourceAppEnabled) {
+        // Handled by VietmapLiveHook.xm (this same dylib, inside Vietmap Live).
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                              (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
+                                              NULL, NULL, YES);
+    }
 }
 
 #pragma mark Preferences
@@ -943,6 +1055,9 @@ static void SplitCarPlayRestoreBrightness(void) {
         SplitCarPlayHostingLog(@"[car]   rootWindow = %@ bounds=%@", self.rootWindow, NSStringFromCGRect(self.rootWindow.bounds));
         if (!self.rootWindow) return;
         self.rootWindow.backgroundColor = [UIColor blackColor];
+        // Above CarPlayApp's own UI on the car display (default level 0
+        // can end up underneath it).
+        self.rootWindow.windowLevel = UIWindowLevelStatusBar + 1;
         [self logTouchRoutingCandidates];
 
         // Slots: left always; right unless single-app mode or same app.
@@ -1573,6 +1688,10 @@ static void SplitCarPlayRestoreBrightness(void) {
         [self publishCarPlayState];
         SplitCarPlayHostingLog(@"[car] stop: done");
         SplitCarPlayHostingLog(@"[mem] car-stop %@ kept=%lu", SCPMemLine(), (unsigned long)SCPHostKeptObjectCount());
+        // Car replugged while we were closing: that connect was skipped
+        // (tearingDown), so start now. After ✕ this only publishes the state
+        // (dismissedUntilReconnect is set).
+        if (self.carPlayDisplayPresent) [self reloadFromPreferences];
         // Marker cleared a bit later, so a crash right after closing counts.
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             if (!self.rootWindow && !self.tearingDown) SplitCarPlayWritePref(@"carPlaySessionActive", @NO);
@@ -1753,38 +1872,20 @@ static void SplitCarPlayRestoreBrightness(void) {
         }
         SCPSetCarPlayState(SCPCarPlayStateDisconnected);
 
-        // Re-check whenever a display connects/disconnects (CarPlay plug/unplug)
-        // and whenever the user changes a preference.
+        // CarPlay plug/unplug: checkCarPlayDisplay (polled, see
+        // startWatchingCarPlayDisplay); UIScreen notifications, when
+        // SpringBoard gets them, only make it check sooner. The display list
+        // can lag the notification, so check again a second later.
+        void (^checkSoon)(NSNotification *) = ^(NSNotification *note) {
+            [[SplitCarPlayController sharedInstance] checkCarPlayDisplay];
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                [[SplitCarPlayController sharedInstance] checkCarPlayDisplay];
+            });
+        };
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenDidConnectNotification
-                                                            object:nil
-                                                             queue:nil
-                                                        usingBlock:^(NSNotification *note) {
-            [[SplitCarPlayController sharedInstance] reloadFromPreferences];
-        }];
+                                                            object:nil queue:nil usingBlock:checkSoon];
         [[NSNotificationCenter defaultCenter] addObserverForName:UIScreenDidDisconnectNotification
-                                                            object:nil
-                                                             queue:nil
-                                                        usingBlock:^(NSNotification *note) {
-            [[SplitCarPlayController sharedInstance] teardown];
-            // The car went away: next connect may auto-start again.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (getCarPlayDisplay()) return;
-                [SplitCarPlayController sharedInstance].dismissedUntilReconnect = NO;
-                [[SplitCarPlayController sharedInstance] publishCarPlayState];
-            });
-            if (![[SplitCarPlayController sharedInstance] autoExitSourceAppEnabled]) return;
-            // Only react to CarPlay going away, not e.g. an AirPlay screen:
-            // give the display list a moment to update, then check whether a
-            // CarPlay display is still there.
-            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-                if (getCarPlayDisplay()) return;
-                // Handled by VietmapLiveHook.xm (this same dylib, running
-                // inside Vietmap Live's own process).
-                CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
-                                                      (__bridge CFStringRef)@"com.example.splitcarplay/request-exit-source",
-                                                      NULL, NULL, YES);
-            });
-        }];
+                                                            object:nil queue:nil usingBlock:checkSoon];
 
         CFNotificationCenterAddObserver(
             CFNotificationCenterGetDarwinNotifyCenter(),
@@ -1817,6 +1918,9 @@ static void SplitCarPlayRestoreBrightness(void) {
         // can crash on every respawn (-> safe mode).
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
             SplitCarPlayRestoreBrightness(); // left dimmed if SpringBoard died mid-session
+            // Starts a session if a car is already connected; the reload
+            // after it then only publishes the state / restyles.
+            [[SplitCarPlayController sharedInstance] startWatchingCarPlayDisplay];
             [[SplitCarPlayController sharedInstance] reloadFromPreferences];
         });
     }
